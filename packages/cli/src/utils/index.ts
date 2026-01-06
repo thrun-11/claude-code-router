@@ -238,7 +238,7 @@ export const restartService = async () => {
 
   // Start the service again in the background
   console.log("Starting claude code router service...");
-  const cliPath = path.join(__dirname, "../cli.js");
+  const cliPath = path.join(__dirname, "cli.js");
   const startProcess = spawn("node", [cliPath, "start"], {
     detached: true,
     stdio: "ignore",
