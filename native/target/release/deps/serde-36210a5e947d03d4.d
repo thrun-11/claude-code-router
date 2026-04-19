@@ -1,0 +1,14 @@
+/Users/arnodorian/claude-code-router/native/target/release/deps/serde-36210a5e947d03d4.d: /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/arnodorian/claude-code-router/native/target/release/build/serde-114433a2996b98c2/out/private.rs
+
+/Users/arnodorian/claude-code-router/native/target/release/deps/libserde-36210a5e947d03d4.rlib: /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/arnodorian/claude-code-router/native/target/release/build/serde-114433a2996b98c2/out/private.rs
+
+/Users/arnodorian/claude-code-router/native/target/release/deps/libserde-36210a5e947d03d4.rmeta: /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/arnodorian/claude-code-router/native/target/release/build/serde-114433a2996b98c2/out/private.rs
+
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/Users/arnodorian/claude-code-router/native/target/release/build/serde-114433a2996b98c2/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/arnodorian/claude-code-router/native/target/release/build/serde-114433a2996b98c2/out

@@ -1,0 +1,1 @@
+cargo:rustc-env=MIME_TYPES_GENERATED_PATH=/Users/arnodorian/claude-code-router/native/target/release/build/mime_guess-351c502cdb831cb1/out/mime_types_generated.rs

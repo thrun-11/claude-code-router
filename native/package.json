@@ -1,0 +1,24 @@
+{
+  "name": "@CCR/codex-tls",
+  "version": "0.1.0",
+  "description": "Codex TLS addon - HTTP client with rustls matching Codex Desktop fingerprint",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "codex-tls",
+    "triples": {
+      "darwin-arm64": ["darwin", "arm64"],
+      "darwin-x64": ["darwin", "x64"],
+      "linux-x64-gnu": ["linux", "x64-gnu"],
+      "win32-x64-msvc": ["win32", "x64-msvc"]
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build-debug": "napi build --platform"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2"
+  },
+  "dependencies": {}
+}
