@@ -1,0 +1,11 @@
+/Users/arnodorian/claude-code-router/native/target/release/deps/socket2-5d9b06a55dd0eef4.d: /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/lib.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/sockaddr.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/socket.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/sockref.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/sys/unix.rs
+
+/Users/arnodorian/claude-code-router/native/target/release/deps/libsocket2-5d9b06a55dd0eef4.rlib: /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/lib.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/sockaddr.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/socket.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/sockref.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/sys/unix.rs
+
+/Users/arnodorian/claude-code-router/native/target/release/deps/libsocket2-5d9b06a55dd0eef4.rmeta: /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/lib.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/sockaddr.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/socket.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/sockref.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/sys/unix.rs
+
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/lib.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/sockaddr.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/socket.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/sockref.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.3/src/sys/unix.rs:

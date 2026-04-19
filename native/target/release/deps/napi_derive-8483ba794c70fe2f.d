@@ -1,0 +1,10 @@
+/Users/arnodorian/claude-code-router/native/target/release/deps/napi_derive-8483ba794c70fe2f.d: /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/lib.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/compat_macro.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/expand.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/parser/mod.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/parser/attrs.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/expand/napi.rs
+
+/Users/arnodorian/claude-code-router/native/target/release/deps/libnapi_derive-8483ba794c70fe2f.dylib: /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/lib.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/compat_macro.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/expand.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/parser/mod.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/parser/attrs.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/expand/napi.rs
+
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/lib.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/compat_macro.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/expand.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/parser/mod.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/parser/attrs.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-derive-2.16.13/src/expand/napi.rs:

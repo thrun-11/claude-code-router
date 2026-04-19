@@ -13,6 +13,16 @@ import { ProviderService } from "@/services/provider";
 import { TransformerService } from "@/services/transformer";
 import { Transformer } from "@/types/transformer";
 
+function isResponseLike(value: any): value is Response {
+  return (
+    value &&
+    typeof value === "object" &&
+    typeof value.text === "function" &&
+    typeof value.json === "function" &&
+    typeof value.body !== "undefined"
+  );
+}
+
 // Extend FastifyInstance to include custom services
 declare module "fastify" {
   interface FastifyInstance {
@@ -52,7 +62,7 @@ async function handleTransformerEndpoint(
 
   try {
     // Process request transformer chain
-    const { requestBody, config, bypass } = await processRequestTransformers(
+    const { requestBody, config, bypass, senderTransformer } = await processRequestTransformers(
       body,
       provider,
       transformer,
@@ -70,6 +80,7 @@ async function handleTransformerEndpoint(
       fastify,
       bypass,
       transformer,
+      senderTransformer,
       {
         req,
       }
@@ -150,7 +161,7 @@ async function handleFallback(
       }
 
       // Process request transformer chain
-      const { requestBody, config, bypass } = await processRequestTransformers(
+      const { requestBody, config, bypass, senderTransformer } = await processRequestTransformers(
         newBody,
         provider,
         transformer,
@@ -166,6 +177,7 @@ async function handleFallback(
         fastify,
         bypass,
         transformer,
+        senderTransformer,
         { req: newReq }
       );
 
@@ -208,6 +220,7 @@ async function processRequestTransformers(
   let requestBody = body;
   let config: any = {};
   let bypass = false;
+  let senderTransformer: Transformer | null = null;
 
   // Check if transformers should be bypassed (passthrough mode)
   // Don't bypass for streaming - need response conversion
@@ -236,6 +249,10 @@ async function processRequestTransformers(
     }
   }
 
+  if (!bypass && typeof transformer.sendRequest === "function") {
+    senderTransformer = transformer as Transformer;
+  }
+
   // Execute provider-level transformers
   if (!bypass && provider.transformer?.use?.length) {
     for (const providerTransformer of provider.transformer.use) {
@@ -255,6 +272,10 @@ async function processRequestTransformers(
         config = { ...config, ...transformIn.config };
       } else {
         requestBody = transformIn;
+      }
+
+      if (typeof providerTransformer.sendRequest === "function") {
+        senderTransformer = providerTransformer as Transformer;
       }
     }
   }
@@ -279,10 +300,14 @@ async function processRequestTransformers(
       } else {
         requestBody = transformIn;
       }
+
+      if (typeof modelTransformer.sendRequest === "function") {
+        senderTransformer = modelTransformer as Transformer;
+      }
     }
   }
 
-  return { requestBody, config, bypass };
+  return { requestBody, config, bypass, senderTransformer };
 }
 
 /**
@@ -314,6 +339,7 @@ async function sendRequestToProvider(
   fastify: FastifyInstance,
   bypass: boolean,
   transformer: any,
+  senderTransformer: Transformer | null,
   context: any
 ) {
   const url = config.url || new URL(provider.baseUrl);
@@ -344,33 +370,62 @@ async function sendRequestToProvider(
 
   // Send HTTP request
   // Prepare headers
-  const requestHeaders: Record<string, string> = {
-    Authorization: `Bearer ${provider.apiKey}`,
-    ...(config?.headers || {}),
-  };
+  const configHeaders = config?.headers || {};
+  const requestHeaders: Record<string, string> = {};
+
+  // Only add Authorization if not already provided by transformer
+  if (!configHeaders["Authorization"] && !configHeaders["authorization"] && provider.apiKey) {
+    requestHeaders["Authorization"] = `Bearer ${provider.apiKey}`;
+  }
+
+  // Merge transformer headers (these take precedence)
+  for (const [key, value] of Object.entries(configHeaders)) {
+    if (value && value !== "undefined") {
+      requestHeaders[key] = value as string;
+    }
+  }
 
   for (const key in requestHeaders) {
     if (requestHeaders[key] === "undefined") {
       delete requestHeaders[key];
-    } else if (
-      ["authorization", "Authorization"].includes(key) &&
-      requestHeaders[key]?.includes("undefined")
-    ) {
-      delete requestHeaders[key];
     }
   }
 
-  const response = await sendUnifiedRequest(
-    url,
-    requestBody,
-    {
-      httpsProxy: fastify.configService.getHttpsProxy(),
-      ...config,
-      headers: JSON.parse(JSON.stringify(requestHeaders)),
-    },
-    context,
-    fastify.log
-  );
+  // For Codex transformer, ensure proper headers are preserved
+  if (config?.headers?.["x-codex-internal"] === "true") {
+    // Codex transformer provides all headers - don't add default Authorization
+    delete requestHeaders["Authorization"];
+  }
+
+  const requestConfig = {
+    httpsProxy: fastify.configService.getHttpsProxy(),
+    ...config,
+    headers: JSON.parse(JSON.stringify(requestHeaders)),
+  };
+
+  const requestSender =
+    senderTransformer && typeof senderTransformer.sendRequest === "function"
+      ? senderTransformer
+      : transformer;
+
+  const response =
+    typeof requestSender.sendRequest === "function"
+      ? await requestSender.sendRequest(requestBody, requestConfig, provider, context)
+      : await sendUnifiedRequest(
+          url,
+          requestBody,
+          requestConfig,
+          context,
+          fastify.log
+        );
+
+  if (!isResponseLike(response)) {
+    throw createApiError(
+      `Invalid provider response object for ${provider.name}`,
+      500,
+      "provider_response_error"
+    );
+  }
 
   // Handle request errors
   if (!response.ok) {

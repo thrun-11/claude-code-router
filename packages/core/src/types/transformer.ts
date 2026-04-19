@@ -40,4 +40,12 @@ export type Transformer = {
   
   // Logger for transformer
   logger?: any;
+
+  // Optional custom sender for provider requests
+  sendRequest?: (
+    request: UnifiedChatRequest,
+    config: any,
+    provider: LLMProvider,
+    context: TransformerContext
+  ) => Promise<Response>;
 };

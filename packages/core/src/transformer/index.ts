@@ -21,6 +21,7 @@ import { OpenAIResponsesTransformer } from "./openai.responses.transformer";
 import { ForceReasoningTransformer } from "./forcereasoning.transformer";
 import { QwenCLITransformer } from "./qwen-cli.transformer";
 import { CopilotTransformer } from "./copilot.transformer";
+import { CodexTransformer } from "./codex.transformer";
 
 export default {
   AnthropicTransformer,
@@ -45,5 +46,6 @@ export default {
   VercelTransformer,
   OpenAIResponsesTransformer,
   ForceReasoningTransformer,
-  QwenCLITransformer
+  QwenCLITransformer,
+  CodexTransformer
 };

@@ -1,0 +1,10 @@
+/Users/arnodorian/claude-code-router/native/target/release/deps/zerovec_derive-b77532620a3ca67e.d: /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/lib.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/make_ule.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/make_varule.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/ule.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/utils.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/varule.rs
+
+/Users/arnodorian/claude-code-router/native/target/release/deps/libzerovec_derive-b77532620a3ca67e.dylib: /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/lib.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/make_ule.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/make_varule.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/ule.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/utils.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/varule.rs
+
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/lib.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/make_ule.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/make_varule.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/ule.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/utils.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerovec-derive-0.11.3/src/varule.rs:

@@ -1,0 +1,9 @@
+/Users/arnodorian/claude-code-router/native/target/release/deps/futures_macro-4ea6912b50655d63.d: /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/lib.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/executor.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/join.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/select.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/stream_select.rs
+
+/Users/arnodorian/claude-code-router/native/target/release/deps/libfutures_macro-4ea6912b50655d63.dylib: /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/lib.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/executor.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/join.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/select.rs /Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/stream_select.rs
+
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/lib.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/executor.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/join.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/select.rs:
+/Users/arnodorian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/stream_select.rs:
