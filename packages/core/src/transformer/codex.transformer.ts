@@ -349,10 +349,6 @@ export class CodexTransformer implements Transformer {
       parallel_tool_calls: true,
     };
 
-    if (request.temperature !== undefined) {
-      transformed.temperature = request.temperature;
-    }
-
     transformed.reasoning = {
       effort: request.reasoning?.effort || "xhigh",
     };
