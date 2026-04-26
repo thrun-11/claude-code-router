@@ -93,6 +93,7 @@ async function handleTransformerEndpoint(
       provider,
       transformer,
       bypass,
+      senderTransformer,
       {
         req,
       }
@@ -188,6 +189,7 @@ async function handleFallback(
         provider,
         transformer,
         bypass,
+        senderTransformer,
         { req: newReq }
       );
 
@@ -453,6 +455,7 @@ async function processResponseTransformers(
   provider: any,
   transformer: any,
   bypass: boolean,
+  senderTransformer: Transformer | null,
   context: any
 ) {
   let finalResponse = response;
@@ -494,7 +497,8 @@ async function processResponseTransformers(
   }
 
   // Execute transformer's transformResponseIn method
-  if (!bypass && transformer.transformResponseIn) {
+  // Skip when a provider-level transformer handled sendRequest (senderTransformer is set)
+  if (!bypass && !senderTransformer && transformer.transformResponseIn) {
     finalResponse = await transformer.transformResponseIn(
       finalResponse,
       context

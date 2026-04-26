@@ -22,6 +22,7 @@ import { ForceReasoningTransformer } from "./forcereasoning.transformer";
 import { QwenCLITransformer } from "./qwen-cli.transformer";
 import { CopilotTransformer } from "./copilot.transformer";
 import { CodexTransformer } from "./codex.transformer";
+import { AntigravityTransformer } from "./antigravity/antigravity.transformer";
 
 export default {
   AnthropicTransformer,
@@ -47,5 +48,6 @@ export default {
   OpenAIResponsesTransformer,
   ForceReasoningTransformer,
   QwenCLITransformer,
-  CodexTransformer
+  CodexTransformer,
+  AntigravityTransformer
 };
