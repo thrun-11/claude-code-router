@@ -30,13 +30,6 @@ export class CloudCodeClient {
     request: UnifiedChatRequest,
     options?: { fallbackEnabled?: boolean }
   ): Promise<Response> {
-    try {
-      // @ts-ignore
-      const fs = require('fs');
-      const googleRequest = (request as any).googleRequest as GoogleRequest;
-      fs.writeFileSync('/tmp/ccr-debug.json', JSON.stringify({ googleRequest }, null, 2));
-    } catch (e) {}
-    
     const model = (request as any).model || "claude-sonnet-4-6-thinking";
     const isThinking = isThinkingModel(model);
 
@@ -53,11 +46,6 @@ export class CloudCodeClient {
     }
 
     const googleRequest = (request as any).googleRequest as GoogleRequest;
-
-    const fs = require('fs');
-    try {
-      fs.writeFileSync('/tmp/ccr-debug.json', JSON.stringify(googleRequest, null, 2));
-    } catch (e) {}
 
     if (request.stream) {
       return this.sendMessageStream(request, token, account, googleRequest);
@@ -176,10 +164,6 @@ export class CloudCodeClient {
                 topP: (request as any).top_p,
                 topK: (request as any).top_k,
               });
-
-              const fs = require('fs');
-              const debugPath = '/Users/arnodorian/.claude-code-router/debug-contents.json';
-              fs.writeFileSync(debugPath, JSON.stringify(payload.request.contents, null, 2));
 
               const sessionId = payload.request.sessionId;
               const headers = buildHeaders(token, model, sessionId);

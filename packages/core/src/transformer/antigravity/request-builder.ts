@@ -76,10 +76,6 @@ export function buildCloudCodeRequest(
     },
   };
 
-  const fs = require("fs");
-  const debugPath = "/Users/arnodorian/.claude-code-router/debug-contents.json";
-  fs.writeFileSync(debugPath, JSON.stringify(request.contents, null, 2));
-
   return {
     project: projectId || DEFAULT_PROJECT_ID,
     model,
