@@ -18,6 +18,7 @@ import { parseJsonObjectSafe, releaseJsonObject, serializeJsonBody, serializeJso
 import { resolveGatewayPublicModelId } from "@ccr/core/gateway/features/model-discovery";
 import { activeProviderCredentials, findProviderByPublicOrInternalName, findProviderCredentialBySlug, normalizedProviderCapabilities, parseProviderCredentialInternalName, providerCapabilityForClientProtocol, providerCapabilityInternalName, providerCapabilityNameMatches, providerCredentialInternalName, providerCredentialPriority, providerCredentialRuntimeId, providerCredentialSlug, providerProtocolForClientProtocol, sanitizeHeaderValue } from "@ccr/core/providers/runtime-topology";
 import { delay } from "@ccr/core/gateway/internal/clock";
+import { executeTransformerAttempt } from "@ccr/core/transformer/bridge/transformer-attempt";
 import { retryDelayAfterNetworkError, retryDelayAfterStatus, shouldFallbackAfterStatus } from "@ccr/core/gateway/upstream/retry-policy";
 import { claudeCodeOauthBetaHeader, claudeCodeOauthRequiredBeta, UpstreamRequestError } from "@ccr/core/gateway/internal/shared";
 import type { ApiKeyLimitUsage, ProviderCredentialRoutingTarget, UpstreamAttempt, UpstreamFailedAttempt, UpstreamFetchResult } from "@ccr/core/gateway/internal/shared";
@@ -313,6 +314,7 @@ export async function fetchUpstreamWithFallback(input: {
     const attemptProvider = attempt.logicalProvider ?? (
       attempt.target?.kind === "provider" ? attempt.target.provider.name : undefined
     );
+    const transformerProvider = resolveTransformerProviderForAttempt(input.config, attempt, attemptHeaders);
     const attemptStartedAt = Date.now();
     input.trace?.capture({
       attempt: attemptNumber,
@@ -350,7 +352,19 @@ export async function fetchUpstreamWithFallback(input: {
     releaseJsonObject(input.body);
 
     try {
-      const response = await fetchWithSystemProxy(attemptUrl, {
+      let response: Response | undefined;
+      if (transformerProvider) {
+        const transformerAttempt = await executeTransformerAttempt({
+          body: attempt.body,
+          headers: attemptHeaders,
+          method: input.method,
+          path: input.path,
+          provider: transformerProvider,
+          signal: input.signal
+        });
+        response = transformerAttempt?.response;
+      }
+      response ??= await fetchWithSystemProxy(attemptUrl, {
         body: shouldSendBody(input.method) ? attempt.body?.toString("utf8") : undefined,
         headers: attemptHeaders,
         method: input.method,
@@ -819,6 +833,22 @@ function firstTargetProviderHeader(headers: Record<string, string>): string | un
     ?.split(",")
     .map((item) => item.trim())
     .find(Boolean);
+}
+
+
+function resolveTransformerProviderForAttempt(
+  config: AppConfig,
+  attempt: UpstreamAttempt,
+  headers: Record<string, string>
+): GatewayProviderConfig | undefined {
+  if (attempt.target?.kind === "provider") {
+    return attempt.target.provider;
+  }
+  const targetProviderName = firstTargetProviderHeader(headers);
+  if (!targetProviderName) {
+    return undefined;
+  }
+  return findProviderByPublicOrInternalName(config, targetProviderName);
 }
 
 
