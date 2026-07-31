@@ -1,5 +1,5 @@
-import { Transformer, TransformerContext } from "@/types/transformer";
-import { LLMProvider, UnifiedChatRequest } from "@/types/llm";
+import { Transformer, TransformerContext } from "@ccr/core/types/transformer";
+import { LLMProvider, UnifiedChatRequest } from "@ccr/core/types/llm";
 import { convertAnthropicToGoogle } from "./request-converter";
 import { CloudCodeClient } from "./cloudcode-client";
 import { AuthManager } from "./auth-manager";

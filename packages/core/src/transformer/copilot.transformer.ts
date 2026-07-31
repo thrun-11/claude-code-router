@@ -1,15 +1,15 @@
-import { Transformer, TransformerContext } from "@/types/transformer";
-import { LLMProvider, UnifiedChatRequest, UnifiedMessage } from "@/types/llm";
+import { Transformer, TransformerContext } from "@ccr/core/types/transformer";
+import { LLMProvider, UnifiedChatRequest, UnifiedMessage } from "@ccr/core/types/llm";
 import {
   copilotBaseUrl,
   copilotHeaders,
-} from "@/services/copilot/api-config";
+} from "@ccr/core/services/copilot/api-config";
 import {
   loadCopilotToken,
   saveCopilotToken,
   getCopilotToken,
   isTokenExpiringSoon,
-} from "@/services/copilot/token";
+} from "@ccr/core/services/copilot/token";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 

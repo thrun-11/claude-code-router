@@ -1,6 +1,6 @@
-import { Transformer, TransformerConstructor } from "@/types/transformer";
+import { Transformer, TransformerConstructor } from "@ccr/core/types/transformer";
 import { ConfigService } from "./config";
-import Transformers from "@/transformer";
+import Transformers from "@ccr/core/transformer";
 import Module from "node:module";
 
 /**

@@ -1,4 +1,4 @@
-import { UnifiedChatRequest } from "@/types/llm";
+import { UnifiedChatRequest } from "@ccr/core/types/llm";
 import {
   ANTIGRAVITY_ENDPOINTS,
   isThinkingModel,

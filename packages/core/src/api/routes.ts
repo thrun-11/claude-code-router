@@ -4,14 +4,14 @@ import {
   FastifyRequest,
   FastifyReply,
 } from "fastify";
-import { RegisterProviderRequest, LLMProvider } from "@/types/llm";
-import { sendUnifiedRequest } from "@/utils/request";
+import { RegisterProviderRequest, LLMProvider } from "@ccr/core/types/llm";
+import { sendUnifiedRequest } from "@ccr/core/utils/request";
 import { createApiError } from "./middleware";
 import { version } from "../../package.json";
-import { ConfigService } from "@/services/config";
-import { ProviderService } from "@/services/provider";
-import { TransformerService } from "@/services/transformer";
-import { Transformer } from "@/types/transformer";
+import { ConfigService } from "@ccr/core/services/config";
+import { ProviderService } from "@ccr/core/services/provider";
+import { TransformerService } from "@ccr/core/services/transformer";
+import { Transformer } from "@ccr/core/types/transformer";
 
 function isResponseLike(value: any): value is Response {
   return (

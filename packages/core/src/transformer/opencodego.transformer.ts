@@ -1,5 +1,5 @@
-import { UnifiedChatRequest, LLMProvider } from "@/types/llm";
-import { Transformer, TransformerContext } from "@/types/transformer";
+import { UnifiedChatRequest, LLMProvider } from "@ccr/core/types/llm";
+import { Transformer, TransformerContext } from "@ccr/core/types/transformer";
 import { ProxyAgent } from "undici";
 
 const CHAT_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions";

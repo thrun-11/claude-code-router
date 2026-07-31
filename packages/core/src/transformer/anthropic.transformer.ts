@@ -4,16 +4,16 @@ import {
   UnifiedChatRequest,
   UnifiedMessage,
   UnifiedTool,
-} from "@/types/llm";
+} from "@ccr/core/types/llm";
 import {
   Transformer,
   TransformerContext,
   TransformerOptions,
-} from "@/types/transformer";
-import { v4 as uuidv4 } from "uuid";
-import { getThinkLevel } from "@/utils/thinking";
-import { createApiError } from "@/api/middleware";
-import { formatBase64 } from "@/utils/image";
+} from "@ccr/core/types/transformer";
+import { randomUUID } from "node:crypto";
+import { getThinkLevel } from "@ccr/core/utils/thinking";
+import { createApiError } from "@ccr/core/api/middleware";
+import { formatBase64 } from "@ccr/core/utils/image";
 
 export class AnthropicTransformer implements Transformer {
   name = "Anthropic";
@@ -1016,7 +1016,7 @@ export class AnthropicTransformer implements Transformer {
                       index: annotationBlockIndex,
                       content_block: {
                         type: "web_search_tool_result",
-                        tool_use_id: `srvtoolu_${uuidv4()}`,
+                        tool_use_id: `srvtoolu_${randomUUID()}`,
                         content: [
                           {
                             type: "web_search_result",
@@ -1307,7 +1307,7 @@ export class AnthropicTransformer implements Transformer {
       }
       const content: any[] = [];
       if (choice.message.annotations) {
-        const id = `srvtoolu_${uuidv4()}`;
+        const id = `srvtoolu_${randomUUID()}`;
         content.push({
           type: "server_tool_use",
           id,
@@ -1335,7 +1335,11 @@ export class AnthropicTransformer implements Transformer {
         });
       }
       if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
-        choice.message.tool_calls.forEach((toolCall) => {
+        choice.message.tool_calls.forEach((rawToolCall) => {
+          const toolCall = rawToolCall as {
+            id: string;
+            function: { name: string; arguments: string };
+          };
           let parsedInput = {};
           try {
             const argumentsStr = toolCall.function.arguments || "{}";

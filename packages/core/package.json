@@ -16,9 +16,13 @@
     "test:integration": "node ../../build/test.mjs core --scope integration && node ../../build/run-tests.mjs core"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.54.0",
     "@the-next-ai/ai-gateway": "^1.0.12",
     "@the-next-ai/bot-gateway-sdk": "^0.1.0",
     "better-sqlite3": "^12.11.1",
+    "dotenv": "^16.5.0",
+    "fastify": "^5.4.0",
+    "json5": "^2.2.3",
     "node-forge": "^1.4.0",
     "pm2": "^6.0.13",
     "undici": "^7.27.2"

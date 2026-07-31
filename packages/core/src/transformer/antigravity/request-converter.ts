@@ -1,7 +1,7 @@
 import {
   UnifiedChatRequest,
   UnifiedMessage,
-} from "@/types/llm";
+} from "@ccr/core/types/llm";
 import {
   getModelFamily,
   isThinkingModel,

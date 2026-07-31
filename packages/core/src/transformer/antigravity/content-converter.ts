@@ -1,4 +1,4 @@
-import { UnifiedMessage } from "@/types/llm";
+import { UnifiedMessage } from "@ccr/core/types/llm";
 
 export function convertRole(role: string): string {
   switch (role) {
