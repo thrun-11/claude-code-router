@@ -16,6 +16,8 @@ import { ensureProfileGateway, ProfileGatewayUnavailableError } from "@ccr/core/
 import { buildProfileLaunchPlan, defaultProfileOpenSurface, findProfileForOpen, profileLaunchSpawnCommand, resolveProfileOpenSurface, shouldAutoStartProfileGateway } from "@ccr/core/profiles/launch-core";
 import { openSystemExternal, startWebManagementServer } from "@ccr/core/web/management-server";
 import { assertAvailableGatewayModels, type AppConfig, type GatewayStatus, type ProfileConfig, type ProfileOpenResult, type ProfileOpenSurface } from "@ccr/core/contracts/app";
+import { runAuthCopilot } from "./utils/auth-copilot";
+import { runAuthAntigravity, listAccounts, removeAccount, setActiveAccount, checkAuthStatus, checkQuota } from "./utils/auth-antigravity";
 
 installSocketTypeOfServiceCompat();
 
@@ -44,7 +46,15 @@ type StopCliOptions = {
   help: boolean;
 };
 
-type CliOptions = ProfileCliOptions | StopCliOptions | WebCliOptions;
+type AuthCliOptions = {
+  authProvider: string;
+  authSubcommand?: string;
+  authArg?: string;
+  command: "auth";
+  help: boolean;
+};
+
+type CliOptions = ProfileCliOptions | StopCliOptions | WebCliOptions | AuthCliOptions;
 
 type ServiceState = {
   host?: string;
@@ -102,6 +112,49 @@ async function main(): Promise<void> {
       return;
     }
     await runWebServer(options);
+    return;
+  }
+
+  if (options.command === "auth") {
+    const authOptions = options as AuthCliOptions;
+    if (authOptions.help) {
+      printAuthHelp(0);
+      return;
+    }
+    const provider = authOptions.authProvider;
+    if (provider === "copilot") {
+      const accountType = authOptions.authSubcommand === "business" ? "business" : authOptions.authSubcommand === "enterprise" ? "enterprise" : "individual";
+      const force = authOptions.authArg === "--force";
+      await runAuthCopilot(accountType, force);
+      return;
+    }
+    if (provider === "antigravity") {
+      const sub = authOptions.authSubcommand;
+      const arg = authOptions.authArg;
+      if (!sub || sub === "help") {
+        printAuthHelp(0);
+        return;
+      }
+      if (sub === "add") {
+        await runAuthAntigravity();
+      } else if (sub === "list") {
+        await listAccounts();
+      } else if (sub === "remove" && arg) {
+        await removeAccount(arg);
+      } else if (sub === "use" && arg) {
+        await setActiveAccount(arg);
+      } else if (sub === "status") {
+        await checkAuthStatus();
+      } else if (sub === "quota") {
+        await checkQuota();
+      } else {
+        console.log(`Unknown antigravity subcommand: ${sub}`);
+        printAuthHelp(1);
+      }
+      return;
+    }
+    console.log(`Unknown auth provider: ${provider}`);
+    printAuthHelp(1);
     return;
   }
 
@@ -244,6 +297,9 @@ function parseArgs(args: string[]): CliOptions {
   if (args[0] === "serve" || args[0] === "web") {
     return parseWebArgs(args.slice(1), "web");
   }
+  if (args[0] === "auth") {
+    return parseAuthArgs(args.slice(1));
+  }
 
   const options: ProfileCliOptions = {
     agentArgs: [],
@@ -278,6 +334,38 @@ function parseArgs(args: string[]): CliOptions {
       continue;
     }
     options.agentArgs.push(arg);
+  }
+  return options;
+}
+
+function parseAuthArgs(args: string[]): AuthCliOptions {
+  const options: AuthCliOptions = {
+    authProvider: "",
+    command: "auth",
+    help: false
+  };
+  if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
+    options.help = true;
+    return options;
+  }
+  options.authProvider = args[0];
+  if (args[1] === "--help" || args[1] === "-h") {
+    options.help = true;
+    return options;
+  }
+  if (args[0] === "copilot") {
+    const flags = args.slice(1);
+    for (let i = 0; i < flags.length; i++) {
+      if (flags[i] === "--account-type" || flags[i] === "-a") {
+        options.authSubcommand = flags[i + 1];
+        i++;
+      } else if (flags[i] === "--force") {
+        options.authArg = "--force";
+      }
+    }
+  } else if (args[0] === "antigravity") {
+    options.authSubcommand = args[1];
+    options.authArg = args[2];
   }
   return options;
 }
@@ -573,6 +661,7 @@ function printHelp(exitCode: number): void {
     `  ${command} ui [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
     `  ${command} serve [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
     `  ${command} stop`,
+    `  ${command} auth <provider> [options]`,
     `  ${command} <profile-name-or-id> [cli|app] [-- <agent args>]`,
     "",
     "Notes:",
@@ -585,9 +674,40 @@ function printHelp(exitCode: number): void {
     `  ${command} ui`,
     `  ${command} serve --no-open`,
     `  ${command} stop`,
+    `  ${command} auth copilot --account-type individual`,
+    `  ${command} auth antigravity add`,
     `  ${command} Codex`,
     `  ${command} default-codex -- --model gpt-5-codex`,
     `  ${command} default-codex app`
+  ].join("\n");
+  const stream = exitCode === 0 ? process.stdout : process.stderr;
+  stream.write(`${output}\n`);
+  process.exitCode = exitCode;
+}
+
+function printAuthHelp(exitCode: number): void {
+  const command = cliCommandName();
+  const output = [
+    "Usage:",
+    `  ${command} auth copilot [--account-type individual|business|enterprise] [--force]`,
+    `  ${command} auth antigravity add`,
+    `  ${command} auth antigravity list`,
+    `  ${command} auth antigravity remove <email>`,
+    `  ${command} auth antigravity use <email>`,
+    `  ${command} auth antigravity status`,
+    `  ${command} auth antigravity quota`,
+    "",
+    "Subcommands:",
+    "  copilot           Authenticate with GitHub Copilot to use GPT models.",
+    "    --account-type  Account type: individual (default), business, or enterprise.",
+    "    --force         Force re-authentication even if already authenticated.",
+    "  antigravity       Manage Google Antigravity accounts for Claude/Gemini models.",
+    "    add             Add a new Google account via OAuth.",
+    "    list            List configured accounts.",
+    "    remove <email>  Remove an account by email.",
+    "    use <email>     Set the active account.",
+    "    status          Check authentication status of the active account.",
+    "    quota           Open the G1 Credits dashboard."
   ].join("\n");
   const stream = exitCode === 0 ? process.stdout : process.stderr;
   stream.write(`${output}\n`);

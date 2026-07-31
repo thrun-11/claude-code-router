@@ -49,7 +49,7 @@ export async function runAuthCopilot(accountType: string = "individual", force: 
 
     console.log("Copilot authentication complete!");
     console.log(`Token expires at: ${new Date(copilotToken.expires_at * 1000).toLocaleString()}`);
-    console.log(`Auto-refresh in: ${copilotToken.refreshIn - 60} seconds`);
+    console.log(`Auto-refresh in: ${copilotToken.refresh_in - 60} seconds`);
   } catch (error) {
     console.error("Authentication failed:", error);
     process.exit(1);
