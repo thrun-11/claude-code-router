@@ -47,7 +47,20 @@ export function createDefaultAppConfig(options: DefaultAppConfigOptions): AppCon
         models: [],
         retryCount: 1
       },
-      rules: []
+      rules: [
+        {
+          enabled: true,
+          id: "auto-follow-model",
+          name: "Auto follow /model pick for sonnet/haiku/opus",
+          type: "script",
+          script: {
+            apiVersion: 1,
+            file: "~/.claude-code-router/route-auto-follow.js",
+            language: "javascript",
+            timeoutMs: 500
+          }
+        }
+      ]
     },
     agent: {
       mcpServers: []

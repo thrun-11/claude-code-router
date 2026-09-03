@@ -1287,6 +1287,8 @@ function parseProviders(value: unknown): GatewayProviderConfig[] | undefined {
         account: parseProviderAccount(item.account),
         api_base_url: readString(item.api_base_url),
         api_key: readString(item.api_key),
+        api_key_go: readString(item.api_key_go),
+        api_key_zen: readString(item.api_key_zen),
         apiKey: readString(item.apiKey),
         apikey: readString(item.apikey),
         baseUrl: readString(item.baseUrl),

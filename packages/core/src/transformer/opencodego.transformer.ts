@@ -3,6 +3,7 @@ import { Transformer, TransformerContext } from "@ccr/core/types/transformer";
 import { ProxyAgent } from "undici";
 
 const CHAT_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions";
+const FREE_CHAT_ENDPOINT = "https://opencode.ai/zen/v1/chat/completions";
 
 export class OpencodeGoTransformer implements Transformer {
   name = "opencode-go";
@@ -17,6 +18,15 @@ export class OpencodeGoTransformer implements Transformer {
       model.startsWith("qwen-") ||
       model.startsWith("minimax-")
     );
+  }
+
+  private isFreeModel(model: string): boolean {
+    const normalized = model.trim().toLowerCase();
+    return normalized === "big-pickle" || normalized.endsWith("-free");
+  }
+
+  private chatEndpointForModel(model: string): string {
+    return this.isFreeModel(model) ? FREE_CHAT_ENDPOINT : CHAT_ENDPOINT;
   }
 
   async transformRequestIn(
@@ -52,14 +62,15 @@ export class OpencodeGoTransformer implements Transformer {
     context: TransformerContext,
   ): Promise<Response> {
     const model = request.model;
+    const endpoint = this.chatEndpointForModel(model);
 
     if (this.isChatCompletionsModel(model)) {
       const body = this.unifiedToOpenAI(request, model);
-      return this.fetchEndpoint(body, CHAT_ENDPOINT, config, request.stream ?? false, context);
+      return this.fetchEndpoint(body, endpoint, config, request.stream ?? false, context);
     }
 
     const body = this.unifiedToOpenAI(request, model);
-    return this.fetchEndpoint(body, CHAT_ENDPOINT, config, request.stream ?? false, context);
+    return this.fetchEndpoint(body, endpoint, config, request.stream ?? false, context);
   }
 
   private async fetchEndpoint(
@@ -76,7 +87,11 @@ export class OpencodeGoTransformer implements Transformer {
       ...(config.headers || {}),
     };
 
-    if (config.api_key) {
+    const isFree = this.isFreeModel(body.model);
+    const endpointApiKey = isFree ? config.api_key_zen : config.api_key_go;
+    if (endpointApiKey) {
+      headers["Authorization"] = `Bearer ${endpointApiKey}`;
+    } else if (config.api_key) {
       headers["Authorization"] = `Bearer ${config.api_key}`;
     }
 
@@ -114,7 +129,32 @@ export class OpencodeGoTransformer implements Transformer {
       fetchOptions.dispatcher = new ProxyAgent(new URL(config.httpsProxy).toString());
     }
 
-    const response = await fetch(url, fetchOptions);
+    let response = await fetch(url, fetchOptions);
+
+    if (!response.ok && response.status === 429) {
+      const maxRetries = 5;
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        const retryAfterMs = Number.parseFloat(response.headers.get("retry-after-ms") || "");
+        const retryAfterSec = Number.parseFloat(response.headers.get("retry-after") || "");
+        const base = 2000 * Math.pow(2, attempt - 1);
+        const jitter = Math.ceil(base * 0.25 * Math.random());
+        const delayMs = Number.isFinite(retryAfterMs) && retryAfterMs > 0
+          ? retryAfterMs
+          : Number.isFinite(retryAfterSec) && retryAfterSec > 0
+            ? Math.ceil(retryAfterSec * 1000)
+            : Math.min(base + jitter, 30_000);
+        reqLog?.warn?.({
+          opencodeGoRateLimited: true,
+          opencodeGoRetryInMs: delayMs,
+          opencodeGoAttempt: attempt,
+        });
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        response = await fetch(url, fetchOptions);
+        if (response.ok || response.status !== 429) {
+          break;
+        }
+      }
+    }
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => "no body");

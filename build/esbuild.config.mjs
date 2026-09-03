@@ -68,6 +68,7 @@ export const cssOutput = path.join(rendererAssetsDir, "main.css");
 export const webClientBridgeOutput = path.join(rendererAssetsDir, "web-client-bridge.js");
 export const electronUndiciProxyAgentInput = path.join(coreSourceRoot, "proxy", "undici-proxy-agent.ts");
 export const upstreamHeaderSanitizerInput = path.join(coreSourceRoot, "gateway", "core-runtime", "upstream-header-sanitizer.ts");
+export const upstreamMinOutputTokensInput = path.join(coreSourceRoot, "gateway", "core-runtime", "upstream-min-output-tokens.ts");
 const lightweightMcpBundleNames = ["browser-web-search-proxy-mcp.js", "fusion-vision-mcp.js", "fusion-tool-fallback-mcp.js", "media-tools-proxy-mcp.js"];
 const lightweightMcpBundleMaxBytes = 128 * 1024;
 const forbiddenLightweightMcpInputs = [
@@ -234,6 +235,7 @@ export function createMainBuildOptions({ mode = "production", plugins = [] } = {
       path.join(coreSourceRoot, "observability", "request-log-worker.ts"),
       path.join(coreSourceRoot, "routing", "route-script-worker.ts"),
       upstreamHeaderSanitizerInput,
+      upstreamMinOutputTokensInput,
       electronUndiciProxyAgentInput,
       path.join(electronSourceRoot, "main", "preload.ts")
     ],
@@ -264,7 +266,8 @@ export function createCliBuildOptions({ mode = "production", plugins = [] } = {}
       path.join(coreSourceRoot, "mcp", "toolhub-mcp.ts"),
       path.join(coreSourceRoot, "observability", "request-log-worker.ts"),
       path.join(coreSourceRoot, "routing", "route-script-worker.ts"),
-      upstreamHeaderSanitizerInput
+      upstreamHeaderSanitizerInput,
+      upstreamMinOutputTokensInput
     ],
     external: nodeExternals.filter((moduleName) => moduleName !== "electron"),
     format: "cjs",
@@ -292,7 +295,8 @@ export function createCoreServerBuildOptions({ mode = "production", plugins = []
       path.join(coreSourceRoot, "mcp", "toolhub-mcp.ts"),
       path.join(coreSourceRoot, "observability", "request-log-worker.ts"),
       path.join(coreSourceRoot, "routing", "route-script-worker.ts"),
-      upstreamHeaderSanitizerInput
+      upstreamHeaderSanitizerInput,
+      upstreamMinOutputTokensInput
     ],
     external: nodeExternals.filter((moduleName) => moduleName !== "electron"),
     format: "cjs",

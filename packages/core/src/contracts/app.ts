@@ -163,6 +163,8 @@ export type GatewayProviderConfig = {
   account?: ProviderAccountConfig;
   api_base_url?: string;
   api_key?: string;
+  api_key_go?: string;
+  api_key_zen?: string;
   apiKey?: string;
   apikey?: string;
   baseUrl?: string;

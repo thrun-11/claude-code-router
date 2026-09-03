@@ -7,6 +7,7 @@ import { fennoProviderPreset } from "@ccr/core/providers/presets/fenno/index";
 import { geminiProviderPreset } from "@ccr/core/providers/presets/gemini/index";
 import { infistarAiProviderPreset } from "@ccr/core/providers/presets/infistar-ai/index";
 import { kimiCodingProviderPreset } from "@ccr/core/providers/presets/kimi-coding/index";
+import { kiloProviderPreset } from "@ccr/core/providers/presets/kilo/index";
 import { minimaxChinaProviderPreset, minimaxGlobalProviderPreset } from "@ccr/core/providers/presets/minimax/index";
 import { mistralProviderPreset } from "@ccr/core/providers/presets/mistral/index";
 import { moonshotChinaProviderPreset, moonshotGlobalProviderPreset } from "@ccr/core/providers/presets/moonshot/index";
@@ -41,6 +42,7 @@ export const providerPresets: ProviderPreset[] = [
   nvidiaProviderPreset,
   deepSeekProviderPreset,
   kimiCodingProviderPreset,
+  kiloProviderPreset,
   zhipuCnCodingProviderPreset,
   zhipuCnGeneralProviderPreset,
   zaiGlobalCodingProviderPreset,

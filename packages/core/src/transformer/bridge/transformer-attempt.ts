@@ -210,7 +210,11 @@ export async function executeTransformerAttempt(input: TransformerAttemptInput):
     (!modelChain?.length || (modelChain.length === 1 && modelChain[0].name === endpointName));
 
   let requestBody: UnifiedChatRequest = parsedBody;
-  let config: any = { signal: input.signal };
+  let config: any = {
+    signal: input.signal,
+    api_key_go: input.provider.api_key_go,
+    api_key_zen: input.provider.api_key_zen,
+  };
   let senderTransformer: Transformer | undefined;
 
   if (bypass) {

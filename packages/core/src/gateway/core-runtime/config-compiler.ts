@@ -22,6 +22,7 @@ import { isLocalClaudeCodeOauthProviderPlugin, mergeAnthropicBetaValues } from "
 import { resolveConfiguredProviderModelSelector, resolveUniqueConfiguredProviderModelSelector } from "@ccr/core/routing/model-resolution";
 
 const upstreamHeaderSanitizerPluginKey = "ccr-upstream-header-sanitizer";
+const upstreamMinOutputTokensPluginKey = "ccr-upstream-min-output-tokens";
 export const unlimitedVirtualModelToolCalls = Number.MAX_SAFE_INTEGER;
 export const unlimitedVirtualModelToolTurns = Number.MAX_SAFE_INTEGER;
 
@@ -36,9 +37,10 @@ export async function compileCoreGatewayConfig(
 ): Promise<Record<string, unknown>> {
   const pluginCoreGatewayConfig = pluginService.getCoreGatewayConfig();
   const configuredGatewayPlugins = Array.isArray(pluginCoreGatewayConfig.plugins)
-    ? pluginCoreGatewayConfig.plugins.filter((plugin) =>
-        !isRecord(plugin) || stringValue(plugin.key) !== upstreamHeaderSanitizerPluginKey
-      )
+    ? pluginCoreGatewayConfig.plugins.filter((plugin) => {
+        const key = isRecord(plugin) ? stringValue(plugin.key) : undefined;
+        return key !== upstreamHeaderSanitizerPluginKey && key !== upstreamMinOutputTokensPluginKey;
+      })
     : [];
   const pluginBillingConfig = isRecord(pluginCoreGatewayConfig.billing) ? pluginCoreGatewayConfig.billing : {};
   const configuredProviderPlugins = normalizeClaudeCodeOauthProviderPlugins([
@@ -137,6 +139,11 @@ export async function compileCoreGatewayConfig(
         enabled: true,
         key: upstreamHeaderSanitizerPluginKey,
         modulePath: pathJoin(__dirname, "upstream-header-sanitizer.js")
+      },
+      {
+        enabled: true,
+        key: upstreamMinOutputTokensPluginKey,
+        modulePath: pathJoin(__dirname, "upstream-min-output-tokens.js")
       }
     ],
     upstreamTimeoutMs: Number(config.API_TIMEOUT_MS) || 0,
