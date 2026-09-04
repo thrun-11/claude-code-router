@@ -718,6 +718,13 @@ export class OpencodeGoTransformer implements Transformer {
     if (!schema || typeof schema !== "object") {
       return schema;
     }
+    if (Array.isArray(schema)) {
+      return (schema as any[]).map((item) =>
+        typeof item === "object" && item !== null
+          ? this.cleanJsonSchema(item as Record<string, any>)
+          : item,
+      ) as any;
+    }
 
     const cleaned: Record<string, any> = {};
 

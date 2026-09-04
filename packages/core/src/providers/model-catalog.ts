@@ -42,6 +42,7 @@ const presetCatalogProviderIds: Record<string, string[]> = {
   deepseek: ["deepseek"],
   gemini: ["google"],
   "kimi-coding": ["kimi-for-coding"],
+  kilo: ["kilo"],
   mistral: ["mistral"],
   moonshot: ["moonshotai-cn"],
   "moonshot-global": ["moonshotai"],
