@@ -46,6 +46,43 @@ if [ -n "$js" ]; then
   fi
 fi
 [ -z "$model" ] || [ "$model" = "null" ] && model="Unknown"
+# Antigravity quota bar (only when current model is antigravity)
+anti_info=""
+model_lc=$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')
+case "$model_lc" in
+  *antigravity*)
+    ag_cache="/tmp/antigravity-models.json"
+    ag_ttl=300
+    ag_js=""
+    if [ -f "$ag_cache" ]; then ag_mt=$(stat -f %m "$ag_cache" 2>/dev/null || stat -c %Y "$ag_cache" 2>/dev/null); ag_age=$((now-ag_mt)); [ "$ag_age" -lt "$ag_ttl" ] && ag_js=$(cat "$ag_cache" 2>/dev/null); fi
+    if [ -z "$ag_js" ]; then
+      ag_tok=$(jq -r '.activeEmail as $a | .accounts[] | select(.email==$a) | .access_token // empty' ~/.claude-code-router/antigravity-auth.json 2>/dev/null)
+      if [ -n "$ag_tok" ]; then
+        ag_resp=$(curl -s --max-time 2 -H "Authorization: Bearer $ag_tok" -H "Content-Type: application/json" -H "User-Agent: antigravity/1.23.2 DARWIN_ARM64" https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels -d '{}' 2>/dev/null)
+        if echo "$ag_resp" | jq -e '.models' >/dev/null 2>&1; then echo "$ag_resp" > "$ag_cache" 2>/dev/null; ag_js="$ag_resp"; else [ -f "$ag_cache" ] && ag_js=$(cat "$ag_cache" 2>/dev/null); fi
+      fi
+    fi
+    if [ -n "$ag_js" ]; then
+      ag_slug=$(printf '%s' "$model" | sed 's|.*/||' | tr '[:upper:]' '[:lower:]' | sed 's/ (.*//' | sed 's/[ _]/-/g')
+      ag_frac=""
+      for cand in "$ag_slug" "$(printf '%s' "$ag_slug" | tr '.' '-')" "$(printf '%s' "$ag_slug" | sed 's/-preview$//')" "$(printf '%s' "$ag_slug" | tr '.' '-' | sed 's/-preview$//')"; do
+        for c2 in "$cand" "$(printf '%s' "$cand" | sed -E 's/-(high|medium|low)$/-tiered/')"; do
+          ag_frac=$(printf '%s' "$ag_js" | jq -r --arg m "$c2" '.models[$m].quotaInfo.remainingFraction // empty' 2>/dev/null)
+          [ -n "$ag_frac" ] && [ "$ag_frac" != "null" ] && break 2
+        done
+      done
+      if [ -n "$ag_frac" ] && [ "$ag_frac" != "null" ]; then
+        ag_pct=$(awk -v f="$ag_frac" 'BEGIN{printf "%.0f", f*100}')
+        ag_fill=$(awk -v f="$ag_frac" 'BEGIN{printf "%d", (f*10+0.5)}')
+        [ "$ag_fill" -gt 10 ] && ag_fill=10; [ "$ag_fill" -lt 0 ] && ag_fill=0
+        ag_bar=""; i=1; while [ $i -le 10 ]; do if [ $i -le $ag_fill ]; then ag_bar="${ag_bar}█"; else ag_bar="${ag_bar}░"; fi; i=$((i+1)); done
+        if [ "${ag_pct:-0}" -lt 10 ]; then ac=31; elif [ "${ag_pct:-0}" -lt 30 ]; then ac=33; else ac=32; fi
+        ag_bar_c=$(printf '\033[%sm%s\033[0m' "$ac" "$ag_bar")
+        anti_info=$(printf ' | anti::%s %s%%' "$ag_bar_c" "$ag_pct")
+      fi
+    fi
+    ;;
+esac
 # CCR latest log: status, model, duration
 ccr_info=""
 if command -v sqlite3 >/dev/null 2>&1; then
@@ -70,4 +107,4 @@ if command -v sqlite3 >/dev/null 2>&1; then
     ccr_info=$(printf ' | ccr::%s %s %s' "$ccr_status_c" "$ccr_model" "$ccr_dur_s")
   fi
 fi
-printf 'context::%s %s%% | go-usage::%s %s%% | %s%s\n' "$ctx_bar" "$ctx_pct" "$go_bar" "$go_pct" "$model" "$ccr_info"
+printf 'context::%s %s%% | go-usage::%s %s%% | %s%s%s\n' "$ctx_bar" "$ctx_pct" "$go_bar" "$go_pct" "$model" "$anti_info" "$ccr_info"
