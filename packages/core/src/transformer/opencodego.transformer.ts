@@ -4,6 +4,8 @@ import { ProxyAgent } from "undici";
 
 const CHAT_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions";
 const FREE_CHAT_ENDPOINT = "https://opencode.ai/zen/v1/chat/completions";
+const GO_RESPONSES_ENDPOINT = "https://opencode.ai/zen/go/v1/responses";
+const ZEN_RESPONSES_ENDPOINT = "https://opencode.ai/zen/v1/responses";
 
 export class OpencodeGoTransformer implements Transformer {
   name = "opencode-go";
@@ -62,6 +64,13 @@ export class OpencodeGoTransformer implements Transformer {
     context: TransformerContext,
   ): Promise<Response> {
     const model = request.model;
+    // Muse Spark models use Responses API per docs/zen and docs/go
+    if (model.startsWith("muse-spark")) {
+      const isFree = this.isFreeModel(model);
+      const endpoint = isFree ? ZEN_RESPONSES_ENDPOINT : GO_RESPONSES_ENDPOINT;
+      const body = this.unifiedToResponses(request);
+      return this.fetchEndpoint(body, endpoint, config, request.stream ?? false, context);
+    }
     const endpoint = this.chatEndpointForModel(model);
 
     if (this.isChatCompletionsModel(model)) {
@@ -169,9 +178,22 @@ export class OpencodeGoTransformer implements Transformer {
       });
     }
 
+    const isResponses = url.includes("/responses");
     if (isStream) {
       if (!response.body) {
         return response;
+      }
+      if (isResponses) {
+        // For Responses API, pass through SSE as-is and let gateway handle conversion, or convert similarly
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            Connection: "keep-alive",
+          },
+        });
       }
       const convertedStream = this.convertOpenAIStreamToAnthropic(response.body, context);
       return new Response(convertedStream, {
@@ -186,6 +208,14 @@ export class OpencodeGoTransformer implements Transformer {
     }
 
     const data = await response.json();
+    if (isResponses) {
+      const anthropicResponse = this.convertResponsesToAnthropic(data);
+      return new Response(JSON.stringify(anthropicResponse), {
+        status: response.status,
+        statusText: response.statusText,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     const anthropicResponse = this.convertOpenAIResponseToAnthropic(data);
     return new Response(JSON.stringify(anthropicResponse), {
       status: response.status,
@@ -284,6 +314,122 @@ export class OpencodeGoTransformer implements Transformer {
     }
 
     return body;
+  }
+
+  private unifiedToResponses(unified: UnifiedChatRequest): any {
+    const input: any[] = [];
+    for (const msg of unified.messages) {
+      if (msg.role === "system") {
+        const text = typeof msg.content === "string" ? msg.content : "";
+        if (text) input.push({ role: "system", content: [{ type: "input_text", text }] });
+        continue;
+      }
+      if (msg.role === "assistant") {
+        const items: any[] = [];
+        if (typeof msg.content === "string" && msg.content) {
+          items.push({ role: "assistant", content: [{ type: "output_text", text: msg.content }] });
+        }
+        if (msg.tool_calls?.length) {
+          for (const tc of msg.tool_calls) {
+            items.push({
+              type: "function_call",
+              call_id: tc.id,
+              name: tc.function.name,
+              arguments: tc.function.arguments,
+            });
+          }
+        }
+        if (items.length) input.push(...items);
+        continue;
+      }
+      if (msg.role === "tool") {
+        input.push({
+          type: "function_call_output",
+          call_id: msg.tool_call_id,
+          output: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
+        });
+        continue;
+      }
+      // user
+      if (typeof msg.content === "string") {
+        input.push({ role: "user", content: [{ type: "input_text", text: msg.content }] });
+      } else if (Array.isArray(msg.content)) {
+        const parts = msg.content.map((part: any) => {
+          if (part.type === "image_url" && part.image_url?.url) {
+            return { type: "input_image", image_url: part.image_url.url };
+          }
+          return { type: "input_text", text: part.text || "" };
+        });
+        input.push({ role: "user", content: parts });
+      } else {
+        input.push({ role: "user", content: [{ type: "input_text", text: "" }] });
+      }
+    }
+    const body: any = {
+      model: unified.model,
+      input,
+      stream: unified.stream ?? false,
+    };
+    if (unified.tools?.length) {
+      body.tools = unified.tools.map((tool) => ({
+        type: "function",
+        name: tool.function.name,
+        description: tool.function.description,
+        parameters: tool.function.parameters,
+      }));
+    }
+    if (unified.tool_choice) body.tool_choice = unified.tool_choice;
+    if (unified.temperature !== undefined) body.temperature = unified.temperature;
+    return body;
+  }
+
+  private convertResponsesToAnthropic(data: any): any {
+    const output = data.output || [];
+    const content: any[] = [];
+    for (const item of output) {
+      if (item.type === "reasoning") {
+        content.push({
+          type: "thinking",
+          thinking: item.encrypted_content ? "" : item.summary?.map((s: any) => s.text).join("") || "",
+          signature: Date.now().toString(),
+        });
+      } else if (item.type === "message" && Array.isArray(item.content)) {
+        for (const part of item.content) {
+          if (part.type === "output_text" && part.text) {
+            content.push({ type: "text", text: part.text });
+          }
+        }
+      } else if (item.type === "function_call") {
+        let input: any = {};
+        try {
+          input = JSON.parse(item.arguments || "{}");
+        } catch {}
+        content.push({
+          type: "tool_use",
+          id: item.call_id || item.id,
+          name: item.name,
+          input,
+        });
+      }
+    }
+    // fallback to direct output_text if no structured output
+    if (content.length === 0 && data.output_text) {
+      content.push({ type: "text", text: data.output_text });
+    }
+    return {
+      id: data.id || `msg_${Date.now()}`,
+      type: "message",
+      role: "assistant",
+      model: data.model || "unknown",
+      content,
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: {
+        input_tokens: data.usage?.input_tokens || data.usage?.prompt_tokens || 0,
+        output_tokens: data.usage?.output_tokens || data.usage?.completion_tokens || 0,
+        cache_read_input_tokens: data.usage?.input_tokens_details?.cached_tokens || 0,
+      },
+    };
   }
 
   private convertOpenAIStreamToAnthropic(
