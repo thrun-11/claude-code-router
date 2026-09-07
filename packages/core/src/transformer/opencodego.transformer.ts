@@ -860,6 +860,9 @@ export class OpencodeGoTransformer implements Transformer {
     };
   }
 
+  // Force Responses-format for Muse Spark (docs/zen + docs/go: muse-spark* only on /responses)
+  // This keeps Muse Spark working via CCR even when provider advertises chat/completions.
+
   private cleanJsonSchema(schema: Record<string, any>): Record<string, any> {
     if (!schema || typeof schema !== "object") {
       return schema;
