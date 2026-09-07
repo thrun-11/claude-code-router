@@ -69,6 +69,36 @@ export const TOKEN_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 export const DEFAULT_COOLDOWN_MS = 10 * 1000;
 export const MAX_RETRIES = 5;
 
+// Tiered Gemini Flash families (from v1internal:fetchAvailableModels tieredModelIds).
+// The backend only knows the `-tiered` ID; agy exposes -high/-medium/-low aliases
+// that map to the same backend ID with different ThinkingLevel.
+export const TIERED_FLASH_FAMILIES = [
+  "gemini-3.8-flash",
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
+] as const;
+
+export const TIER_THINKING_LEVEL: Record<string, string> = {
+  high: "HIGH",
+  medium: "MEDIUM",
+  low: "MINIMAL",
+};
+
+export function resolveTieredModel(modelName: string): { backendModel: string; thinkingLevel?: string } {
+  const normalized = (modelName || "").trim().toLowerCase();
+  for (const family of TIERED_FLASH_FAMILIES) {
+    if (normalized === `${family}-tiered`) {
+      return { backendModel: `${family}-tiered` };
+    }
+    for (const tier of Object.keys(TIER_THINKING_LEVEL)) {
+      if (normalized === `${family}-${tier}`) {
+        return { backendModel: `${family}-tiered`, thinkingLevel: TIER_THINKING_LEVEL[tier] };
+      }
+    }
+  }
+  return { backendModel: modelName };
+}
+
 export const MODEL_FALLBACK_MAP: Record<string, string> = {
   "gemini-3.1-pro-high": "claude-opus-4-6-thinking",
   "gemini-3.1-pro-low": "claude-sonnet-4-6",

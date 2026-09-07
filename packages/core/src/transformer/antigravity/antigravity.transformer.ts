@@ -1,6 +1,7 @@
 import { Transformer, TransformerContext } from "@ccr/core/types/transformer";
 import { LLMProvider, UnifiedChatRequest } from "@ccr/core/types/llm";
 import { convertAnthropicToGoogle } from "./request-converter";
+import { resolveTieredModel } from "./constants";
 import { CloudCodeClient } from "./cloudcode-client";
 import { AuthManager } from "./auth-manager";
 import { sseToResponse, accumulateSSEToResponse } from "./sse-parser";
@@ -56,11 +57,23 @@ export class AntigravityTransformer implements Transformer {
       );
     }
 
-    const googleRequest = convertAnthropicToGoogle(request);
+    // Resolve tiered Flash aliases (e.g. gemini-3.8-flash-high -> gemini-3.8-flash-tiered + ThinkingLevel HIGH)
+    const resolved = resolveTieredModel(request.model || "");
+    const normalizedRequest =
+      resolved.backendModel !== request.model ? { ...request, model: resolved.backendModel } : request;
+
+    const googleRequest = convertAnthropicToGoogle(normalizedRequest);
+    if (resolved.thinkingLevel) {
+      googleRequest.generationConfig = googleRequest.generationConfig || {};
+      googleRequest.generationConfig.thinkingConfig = {
+        ...(googleRequest.generationConfig.thinkingConfig || {}),
+        thinkingLevel: resolved.thinkingLevel,
+      };
+    }
 
     return {
       body: {
-        ...request,
+        ...normalizedRequest,
         googleRequest,
       } as any,
       config: {

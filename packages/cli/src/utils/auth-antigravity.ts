@@ -444,9 +444,12 @@ export async function checkQuota(): Promise<void> {
         const modelsData = await modelsResponse.json();
         if (modelsData.models) {
           const targetModels = [
-            "gemini-3.1-pro-high", 
-            "gemini-3-flash-agent", 
-            "claude-sonnet-4-6", 
+            "gemini-3.1-pro-high",
+            "gemini-3-flash-agent",
+            "gemini-3.8-flash-tiered",
+            "gemini-3.7-flash-tiered",
+            "gemini-3.6-flash-tiered",
+            "claude-sonnet-4-6",
             "claude-opus-4-6-thinking"
           ];
           
