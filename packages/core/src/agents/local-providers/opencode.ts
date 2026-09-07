@@ -151,7 +151,8 @@ export function importOpenCodeProvider(
       candidate,
       provider: {
         ...provider,
-        apiKey: "public"
+        apiKey: "public",
+        transformer: { use: ["opencode-go"] }
       },
       providerPlugins: []
     };
@@ -163,7 +164,10 @@ export function importOpenCodeProvider(
   const authSuffix = `opencode-${candidate.protocol.replaceAll("_", "-")}-api-key`;
   return {
     candidate,
-    provider,
+    provider: {
+      ...provider,
+      transformer: { use: ["opencode-go"] }
+    },
     providerPlugins: [
       openCodeAuthPlugin(candidate.protocol, authSuffix, apiKey),
       openCodeAuthPlugin(candidate.protocol, `${authSuffix}-internal`, apiKey, providerInternalNamePlaceholder)
