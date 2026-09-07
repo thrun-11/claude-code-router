@@ -1,6 +1,7 @@
 #!/bin/bash
 input=$(cat)
 model=$(echo "$input" | jq -r '.model.display_name // empty' 2>/dev/null)
+model_id=$(echo "$input" | jq -r '.model.id // empty' 2>/dev/null)
 used=$(echo "$input" | jq -r '.context_window.used_percentage // empty' 2>/dev/null)
 ctx_bar=""; ctx_pct=""
 if [ -n "$used" ] && [ "$used" != "null" ]; then
@@ -48,7 +49,7 @@ fi
 [ -z "$model" ] || [ "$model" = "null" ] && model="Unknown"
 # Antigravity quota bar (only when current model is antigravity)
 anti_info=""
-model_lc=$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')
+model_lc=$(printf '%s %s' "$model" "$model_id" | tr '[:upper:]' '[:lower:]')
 case "$model_lc" in
   *antigravity*)
     ag_cache="/tmp/antigravity-models.json"
@@ -63,7 +64,9 @@ case "$model_lc" in
       fi
     fi
     if [ -n "$ag_js" ]; then
-      ag_slug=$(printf '%s' "$model" | sed 's|.*/||' | tr '[:upper:]' '[:lower:]' | sed 's/ (.*//' | sed 's/[ _]/-/g')
+      ag_src="$model"
+      case "$(printf '%s' "$model_id" | tr '[:upper:]' '[:lower:]')" in *antigravity*) ag_src="$model_id";; esac
+      ag_slug=$(printf '%s' "$ag_src" | sed 's|.*/||' | sed 's/\[.*//' | tr '[:upper:]' '[:lower:]' | sed 's/ (.*//' | sed 's/[ _]/-/g')
       ag_frac=""
       for cand in "$ag_slug" "$(printf '%s' "$ag_slug" | tr '.' '-')" "$(printf '%s' "$ag_slug" | sed 's/-preview$//')" "$(printf '%s' "$ag_slug" | tr '.' '-' | sed 's/-preview$//')"; do
         for c2 in "$cand" "$(printf '%s' "$cand" | sed -E 's/-(high|medium|low)$/-tiered/')"; do
