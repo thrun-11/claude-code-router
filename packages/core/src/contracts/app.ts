@@ -434,6 +434,7 @@ export type ProviderDeepLinkPayload = {
   name?: string;
   protocol?: GatewayProviderProtocol;
   source?: string;
+  transformer?: unknown;
 };
 
 export type ProviderManifestDeepLinkPayload = {

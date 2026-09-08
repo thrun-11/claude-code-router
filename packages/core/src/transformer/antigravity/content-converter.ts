@@ -1,5 +1,3 @@
-import { UnifiedMessage } from "@ccr/core/types/llm";
-
 export function convertRole(role: string): string {
   switch (role) {
     case "user":
@@ -20,7 +18,7 @@ export function convertRole(role: string): string {
 export function convertContentToParts(
   content: any,
   isClaudeModel: boolean,
-  isGeminiModel: boolean
+  _isGeminiModel: boolean
 ): any[] {
   if (!content) return [];
 
@@ -165,62 +163,4 @@ function normalizeToolArgs(value: any): any {
   }
 
   return { input: value };
-}
-
-function normalizeToolResultContent(content: any): any {
-  if (content === undefined || content === null) {
-    return { text: "" };
-  }
-
-  if (typeof content === "string") {
-    return { text: content };
-  }
-
-  if (Array.isArray(content)) {
-    const textContent = content
-      .filter((item) => item?.type === "text" && typeof item.text === "string")
-      .map((item) => item.text)
-      .join("\n");
-
-    if (textContent) {
-      return { text: textContent };
-    }
-
-    return { text: JSON.stringify(content) };
-  }
-
-  if (typeof content === "object") {
-    return content;
-  }
-
-  return { text: String(content) };
-}
-
-function extractToolResultText(content: any): string {
-  if (content === undefined || content === null) {
-    return "";
-  }
-
-  if (typeof content === "string") {
-    return content;
-  }
-
-  if (Array.isArray(content)) {
-    const textContent = content
-      .filter((item) => item?.type === "text" && typeof item.text === "string")
-      .map((item) => item.text)
-      .join("\n");
-
-    if (textContent) {
-      return textContent;
-    }
-
-    return JSON.stringify(content);
-  }
-
-  if (typeof content === "object") {
-    return JSON.stringify(content);
-  }
-
-  return String(content);
 }

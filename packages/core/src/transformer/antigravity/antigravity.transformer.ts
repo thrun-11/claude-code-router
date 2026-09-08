@@ -4,7 +4,7 @@ import { convertAnthropicToGoogle } from "./request-converter";
 import { resolveTieredModel } from "./constants";
 import { CloudCodeClient } from "./cloudcode-client";
 import { AuthManager } from "./auth-manager";
-import { sseToResponse, accumulateSSEToResponse } from "./sse-parser";
+import { sseToResponse } from "./sse-parser";
 
 export class AntigravityTransformer implements Transformer {
   name = "antigravity";
@@ -30,8 +30,8 @@ export class AntigravityTransformer implements Transformer {
 
   async transformRequestIn(
     request: UnifiedChatRequest,
-    provider: LLMProvider,
-    context: TransformerContext
+    _provider: LLMProvider,
+    _context: TransformerContext
   ): Promise<{
     body: UnifiedChatRequest;
     config: {
@@ -88,9 +88,9 @@ export class AntigravityTransformer implements Transformer {
 
   async sendRequest(
     requestBody: UnifiedChatRequest,
-    config: any,
-    provider: LLMProvider,
-    context: TransformerContext
+    _config: any,
+    _provider: LLMProvider,
+    _context: TransformerContext
   ): Promise<Response> {
     await this.authManager.initialize();
     const response = await this.cloudCodeClient.sendMessage(requestBody);

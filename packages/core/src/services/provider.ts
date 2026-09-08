@@ -186,7 +186,7 @@ export class ProviderService {
     return true;
   }
 
-  toggleProvider(name: string, enabled: boolean): boolean {
+  toggleProvider(name: string, _enabled: boolean): boolean {
     const provider = this.providers.get(name);
     if (!provider) {
       return false;
@@ -225,24 +225,6 @@ export class ProviderService {
 
   getModelRoutes(): ModelRoute[] {
     return Array.from(this.modelRoutes.values());
-  }
-
-  private parseTransformerConfig(transformerConfig: any): any {
-    if (!transformerConfig) return {};
-
-    if (Array.isArray(transformerConfig)) {
-      return transformerConfig.reduce((acc, item) => {
-        if (Array.isArray(item)) {
-          const [name, config = {}] = item;
-          acc[name] = config;
-        } else {
-          acc[item] = {};
-        }
-        return acc;
-      }, {});
-    }
-
-    return transformerConfig;
   }
 
   async getAvailableModels(): Promise<{

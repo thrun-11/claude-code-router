@@ -2,7 +2,7 @@ import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { spawn, exec } from "child_process";
+import { exec } from "child_process";
 
 const AUTH_FILE = path.join(os.homedir(), ".claude-code-router", "antigravity-auth.json");
 
@@ -428,6 +428,7 @@ export async function checkQuota(): Promise<void> {
     console.log(`Account: ${account.email}`);
     console.log(`Project: ${projectId || "Unknown"}`);
     console.log(`Tier ID: ${data.paidTier?.id || data.currentTier?.id || "Unknown"}\n`);
+    console.log(`Available credits: ${availableCredits}`);
 
     try {
       const modelsResponse = await fetch("https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels", {

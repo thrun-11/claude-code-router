@@ -10,11 +10,6 @@ interface TransformerWithStaticName {
 }
 
 
-interface TransformerWithInstanceName {
-  new (): Transformer;
-  name?: never;
-}
-
 export type TransformerConstructor = TransformerWithStaticName;
 
 export interface TransformerContext {

@@ -103,11 +103,6 @@ export class ConfigService {
     }
   }
 
-  private loadEnvironmentVariables(): void {
-    const envConfig = this.parseEnvConfig(process.env);
-    this.config = { ...this.config, ...envConfig };
-  }
-
   private parseEnvConfig(
     env: Record<string, string | undefined>
   ): Partial<AppConfig> {

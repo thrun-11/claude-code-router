@@ -5,7 +5,7 @@ import {
   getFallbackModel,
 } from "./constants";
 import { buildCloudCodeRequest, buildHeaders } from "./request-builder";
-import { sseToResponse, streamSSEResponse, accumulateSSEToResponse } from "./sse-parser";
+import { streamSSEResponse, accumulateSSEToResponse } from "./sse-parser";
 import { convertGoogleToAnthropic } from "./response-converter";
 import { AuthManager } from "./auth-manager";
 import { GoogleRequest } from "./request-converter";
@@ -15,7 +15,6 @@ const DEFAULT_COOLDOWN_MS = 10000;
 
 export class CloudCodeClient {
   private authManager: AuthManager;
-  private endpointIndex = 0;
   private logger: any;
 
   constructor(authManager: AuthManager) {
@@ -28,11 +27,8 @@ export class CloudCodeClient {
 
   async sendMessage(
     request: UnifiedChatRequest,
-    options?: { fallbackEnabled?: boolean }
+    _options?: { fallbackEnabled?: boolean }
   ): Promise<Response> {
-    const model = (request as any).model || "claude-sonnet-4-6-thinking";
-    const isThinking = isThinkingModel(model);
-
     const token = await this.authManager.getActiveToken();
     if (!token) {
       throw new Error(

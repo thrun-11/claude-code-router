@@ -1,11 +1,9 @@
 import type { ChatCompletionMessageParam as OpenAIMessage } from "openai/resources/chat/completions";
 import type { MessageParam as AnthropicMessage } from "@anthropic-ai/sdk/resources/messages";
 import type {
-  ChatCompletion,
   ChatCompletionChunk,
 } from "openai/resources/chat/completions";
 import type {
-  Message,
   MessageStreamEvent,
 } from "@anthropic-ai/sdk/resources/messages";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";

@@ -1,5 +1,4 @@
 import * as os from "os";
-import * as path from "path";
 
 export const IDE_TYPE = {
   UNSPECIFIED: 0,
@@ -133,15 +132,6 @@ export const TEST_MODELS = {
   claude: "claude-sonnet-4-6-thinking",
   gemini: "gemini-3-flash",
 };
-
-function getVersion(): string {
-  try {
-    const packageJson = require("../../../package.json");
-    return packageJson.version || "1.0.0";
-  } catch {
-    return "1.0.0";
-  }
-}
 
 export function getModelFamily(modelName: string): "claude" | "gemini" | "unknown" {
   const lower = (modelName || "").toLowerCase();

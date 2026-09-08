@@ -16,7 +16,7 @@ export const copilotBaseUrl = (accountType: string) =>
     : `https://api.${accountType}.githubcopilot.com`;
 
 export const copilotHeaders = (
-  accountType: string,
+  _accountType: string,
   copilotToken: string,
   vision: boolean = false,
   vsCodeVersion: string = "1.98.0"

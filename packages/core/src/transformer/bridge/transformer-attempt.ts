@@ -77,7 +77,7 @@ function transformerInstanceForName(name: string, options?: any): Transformer | 
 }
 
 function endpointTransformerForPath(path: string): Transformer | undefined {
-  for (const [name, transformerClass] of builtinTransformerClasses()) {
+  for (const [name] of builtinTransformerClasses()) {
     try {
       const instance = transformerInstanceForName(name);
       if (instance?.endPoint && pathMatchesEndpoint(path, instance.endPoint)) {

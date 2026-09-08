@@ -1,6 +1,5 @@
 import {
   FastifyInstance,
-  FastifyPluginAsync,
   FastifyRequest,
   FastifyReply,
 } from "fastify";
@@ -122,7 +121,7 @@ async function handleFallback(
   reply: FastifyReply,
   fastify: FastifyInstance,
   transformer: any,
-  error: any
+  _error: any
 ): Promise<any> {
   const scenarioType = (req as any).scenarioType || 'default';
   const fallbackConfig = fastify.configService.get<any>('fallback');
@@ -577,7 +576,7 @@ export const registerApiRoutes = async (
     },
     async (
       request: FastifyRequest<{ Body: RegisterProviderRequest }>,
-      reply: FastifyReply
+      _reply: FastifyReply
     ) => {
       // Validation
       const { name, baseUrl, apiKey, models } = request.body;
@@ -676,7 +675,7 @@ export const registerApiRoutes = async (
         Params: { id: string };
         Body: Partial<LLMProvider>;
       }>,
-      reply
+      _reply
     ) => {
       const provider = fastify.providerService.updateProvider(
         request.params.id,
@@ -732,7 +731,7 @@ export const registerApiRoutes = async (
         Params: { id: string };
         Body: { enabled: boolean };
       }>,
-      reply
+      _reply
     ) => {
       const success = fastify.providerService.toggleProvider(
         request.params.id,

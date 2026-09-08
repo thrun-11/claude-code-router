@@ -25,8 +25,8 @@ export class QwenCLITransformer implements Transformer {
 
   async transformRequestIn(
     request: UnifiedChatRequest,
-    provider: LLMProvider,
-    context: TransformerContext
+    _provider: LLMProvider,
+    _context: TransformerContext
   ): Promise<{ 
     body: UnifiedChatRequest; 
     config: { 

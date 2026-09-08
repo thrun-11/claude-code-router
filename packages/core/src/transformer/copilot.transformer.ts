@@ -6,7 +6,6 @@ import {
 } from "@ccr/core/services/copilot/api-config";
 import {
   loadCopilotToken,
-  saveCopilotToken,
   getCopilotToken,
   isTokenExpiringSoon,
 } from "@ccr/core/services/copilot/token";
@@ -32,7 +31,7 @@ export class CopilotTransformer implements Transformer {
 
   async transformRequestIn(
     request: UnifiedChatRequest,
-    provider: LLMProvider,
+    _provider: LLMProvider,
     context: TransformerContext
   ): Promise<{ body: any; config: any }> {
     // Load or refresh token if needed
@@ -131,7 +130,7 @@ export class CopilotTransformer implements Transformer {
   /**
    * Build request for GPT models using Responses API
    */
-  private buildGPTRequest(request: UnifiedChatRequest, headers: Record<string, string>): any {
+  private buildGPTRequest(request: UnifiedChatRequest, _headers: Record<string, string>): any {
     // Extract system message for instructions
     const systemMsg = request.messages.find((m) => m.role === "system");
     const otherMessages = request.messages.filter((m) => m.role !== "system");
@@ -186,7 +185,7 @@ export class CopilotTransformer implements Transformer {
   /**
    * Build request for Claude models using Messages API
    */
-  private buildClaudeRequest(request: UnifiedChatRequest, headers: Record<string, string>): any {
+  private buildClaudeRequest(request: UnifiedChatRequest, _headers: Record<string, string>): any {
     // Extract system message
     const systemMsg = request.messages.find((m) => m.role === "system");
 
@@ -443,14 +442,14 @@ export class CopilotTransformer implements Transformer {
 
   async transformResponseOut(
     response: Response,
-    context: TransformerContext
+    _context: TransformerContext
   ): Promise<Response> {
     return response;
   }
 
   async transformResponseIn(
     response: Response,
-    context?: TransformerContext
+    _context?: TransformerContext
   ): Promise<Response> {
     const contentType = response.headers.get("content-type") || "";
     const isStream = contentType.includes("text/event-stream");

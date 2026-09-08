@@ -1,7 +1,6 @@
 import { Transformer, TransformerConstructor } from "@ccr/core/types/transformer";
 import { ConfigService } from "./config";
 import Transformers from "@ccr/core/transformer";
-import Module from "node:module";
 
 /**
  * Check if a value is a class constructor function

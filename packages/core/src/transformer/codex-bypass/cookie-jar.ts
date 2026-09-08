@@ -177,7 +177,7 @@ export class CookieJar {
     }
   }
 
-  warmup(accountId: string, baseUrl: string, headers: Record<string, string>, httpClient: any): string {
+  warmup(accountId: string, _baseUrl: string, headers: Record<string, string>, _httpClient: any): string {
     const cookieHeader = this.getCookieHeader(accountId);
     const requestHeaders = { ...headers };
     if (cookieHeader) {

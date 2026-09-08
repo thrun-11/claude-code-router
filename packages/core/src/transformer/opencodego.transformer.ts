@@ -34,8 +34,8 @@ export class OpencodeGoTransformer implements Transformer {
 
   async transformRequestIn(
     request: UnifiedChatRequest,
-    provider: LLMProvider,
-    context: TransformerContext,
+    _provider: LLMProvider,
+    _context: TransformerContext,
   ): Promise<any> {
     if (request.tools) {
       request.tools = request.tools.map((tool) => {
@@ -61,7 +61,7 @@ export class OpencodeGoTransformer implements Transformer {
   async sendRequest(
     request: UnifiedChatRequest,
     config: any,
-    provider: LLMProvider,
+    _provider: LLMProvider,
     context: TransformerContext,
   ): Promise<Response> {
     const model = request.model;
@@ -505,7 +505,7 @@ export class OpencodeGoTransformer implements Transformer {
 
   private convertOpenAIStreamToAnthropic(
     stream: ReadableStream<Uint8Array>,
-    context: TransformerContext,
+    _context: TransformerContext,
   ): ReadableStream {
     const reader = stream.getReader();
     const decoder = new TextDecoder();

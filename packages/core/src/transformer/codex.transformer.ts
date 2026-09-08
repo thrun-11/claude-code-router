@@ -390,7 +390,7 @@ export class CodexTransformer implements Transformer {
   async transformRequestIn(
     request: UnifiedChatRequest,
     provider: LLMProvider,
-    context: TransformerContext
+    _context: TransformerContext
   ): Promise<{
     body: UnifiedChatRequest;
     config: {
@@ -446,7 +446,7 @@ export class CodexTransformer implements Transformer {
     requestBody: UnifiedChatRequest,
     config: any,
     provider: LLMProvider,
-    context: TransformerContext
+    _context: TransformerContext
   ): Promise<Response> {
     const url = config.url || new URL(provider.baseUrl || this.baseUrl);
     const headers = config.headers || {};

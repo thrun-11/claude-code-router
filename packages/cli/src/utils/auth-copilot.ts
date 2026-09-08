@@ -4,7 +4,7 @@ import {
 } from "../services/copilot/github-auth";
 import { getCopilotToken, saveCopilotToken } from "../services/copilot/token";
 
-export async function runAuthCopilot(accountType: string = "individual", force: boolean = false): Promise<void> {
+export async function runAuthCopilot(accountType: string = "individual", _force: boolean = false): Promise<void> {
   console.log(`Authenticating with GitHub Copilot (${accountType})...`);
 
   try {

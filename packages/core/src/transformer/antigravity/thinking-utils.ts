@@ -152,7 +152,7 @@ export function removeTrailingThinkingBlocks(parts: any[]): any[] {
 }
 
 export function clampGeminiThinkingBudget(
-  modelName: string,
+  _modelName: string,
   budget?: number
 ): number {
   const maxBudget = 24576;
