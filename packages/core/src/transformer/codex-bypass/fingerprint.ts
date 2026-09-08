@@ -153,7 +153,7 @@ export class FingerprintManager {
   async updateFromCodex(baseUrl: string, httpClient: any): Promise<boolean> {
     try {
       const headers = this.buildAnonymousHeaders();
-      const url = `${baseUrl}/codex/usage`;
+      const url = `${baseUrl}/usage`;
 
       const response = await httpClient.get(url, headers, { timeoutSec: 10 });
 

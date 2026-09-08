@@ -86,6 +86,32 @@ case "$model_lc" in
     fi
     ;;
 esac
+# Codex usage bar (only when current model is codex-provider).
+# Usage data is written to the cache by the gateway codex transformer
+# (plain script curl cannot pass the Cloudflare check upstream).
+codex_info=""
+cx_show=""
+case "$model_lc" in
+  *codex/*) cx_show=1 ;;
+  */*) ;; # other provider-qualified model -> not codex
+  *gpt-reserve*|*gpt-5.6-terra*|*gpt-5.6-luna*|*gpt-5.5*|*gpt-5.4-mini*|*codex-auto-review*) cx_show=1 ;;
+esac
+if [ -n "$cx_show" ]; then
+  cx_js=$(cat "/tmp/codex-usage.json" 2>/dev/null)
+  if [ -n "$cx_js" ]; then
+    cx_pct=$(echo "$cx_js" | jq -r '.used_percent // empty' 2>/dev/null)
+    cx_reached=$(echo "$cx_js" | jq -r '.limit_reached // false' 2>/dev/null)
+    if [ -n "$cx_pct" ] && [ "$cx_pct" != "null" ]; then
+      cx_pct_i=$(printf '%.0f' "$cx_pct")
+      cx_fill=$(awk -v p="$cx_pct" 'BEGIN{printf "%d", (p/10+0.5)}')
+      [ "$cx_fill" -gt 10 ] && cx_fill=10; [ "$cx_fill" -lt 0 ] && cx_fill=0
+      cx_bar=""; i=1; while [ $i -le 10 ]; do if [ $i -le $cx_fill ]; then cx_bar="${cx_bar}█"; else cx_bar="${cx_bar}░"; fi; i=$((i+1)); done
+      if [ "$cx_reached" = "true" ] || [ "${cx_pct_i:-0}" -ge 90 ]; then cc=31; elif [ "${cx_pct_i:-0}" -ge 70 ]; then cc=33; else cc=32; fi
+      cx_bar_c=$(printf '\033[%sm%s\033[0m' "$cc" "$cx_bar")
+      codex_info=$(printf ' | codex::%s %s%%' "$cx_bar_c" "$cx_pct_i")
+    fi
+  fi
+fi
 # CCR latest log: status, model, duration
 ccr_info=""
 if command -v sqlite3 >/dev/null 2>&1; then
@@ -110,4 +136,4 @@ if command -v sqlite3 >/dev/null 2>&1; then
     ccr_info=$(printf ' | ccr::%s %s %s' "$ccr_status_c" "$ccr_model" "$ccr_dur_s")
   fi
 fi
-printf 'context::%s %s%% | go-usage::%s %s%% | %s%s%s\n' "$ctx_bar" "$ctx_pct" "$go_bar" "$go_pct" "$model" "$anti_info" "$ccr_info"
+printf 'context::%s %s%% | go-usage::%s %s%% | %s%s%s%s\n' "$ctx_bar" "$ctx_pct" "$go_bar" "$go_pct" "$model" "$anti_info" "$codex_info" "$ccr_info"

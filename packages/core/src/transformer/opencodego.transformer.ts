@@ -1,5 +1,6 @@
 import { UnifiedChatRequest, LLMProvider } from "@ccr/core/types/llm";
 import { Transformer, TransformerContext } from "@ccr/core/types/transformer";
+import { ResponsesToAnthropicStream } from "@ccr/core/transformer/codex.transformer";
 import { ProxyAgent } from "undici";
 
 const CHAT_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions";
@@ -184,8 +185,17 @@ export class OpencodeGoTransformer implements Transformer {
         return response;
       }
       if (isResponses) {
-        // For Responses API, pass through SSE as-is and let gateway handle conversion, or convert similarly
-        return new Response(response.body, {
+        // Convert Responses SSE to Anthropic SSE. The gateway returns our
+        // bytes directly to Claude Code (a custom sendRequest skips endpoint
+        // response conversion), so passing raw response.* events through
+        // yields zero parseable stream events client-side — the same failure
+        // mode the Codex transformer had.
+        const converter = new ResponsesToAnthropicStream(body.model || "unknown");
+        const convertedStream = this.convertResponsesStreamToAnthropic(
+          response.body,
+          converter,
+        );
+        return new Response(convertedStream, {
           status: response.status,
           statusText: response.statusText,
           headers: {
@@ -430,6 +440,67 @@ export class OpencodeGoTransformer implements Transformer {
         cache_read_input_tokens: data.usage?.input_tokens_details?.cached_tokens || 0,
       },
     };
+  }
+
+  private convertResponsesStreamToAnthropic(
+    stream: ReadableStream<Uint8Array>,
+    converter: ResponsesToAnthropicStream,
+  ): ReadableStream {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+
+    return new ReadableStream({
+      async start(controller) {
+        let isClosed = false;
+        const safeEnqueue = (data: string) => {
+          if (isClosed) return;
+          try {
+            controller.enqueue(encoder.encode(data));
+          } catch {
+            isClosed = true;
+          }
+        };
+        const safeClose = () => {
+          if (isClosed) return;
+          isClosed = true;
+          try {
+            controller.close();
+          } catch {}
+        };
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = decoder.decode(value, { stream: true });
+            for (const line of converter.push(chunk)) {
+              safeEnqueue(line);
+            }
+            if (isClosed) break;
+          }
+          for (const line of converter.finish()) {
+            safeEnqueue(line);
+          }
+        } catch (e) {
+          if (!isClosed) {
+            try {
+              controller.error(e);
+            } catch {}
+            isClosed = true;
+          }
+        } finally {
+          try {
+            reader.releaseLock();
+          } catch {}
+          safeClose();
+        }
+      },
+      cancel() {
+        try {
+          reader.cancel();
+        } catch {}
+      },
+    });
   }
 
   private convertOpenAIStreamToAnthropic(

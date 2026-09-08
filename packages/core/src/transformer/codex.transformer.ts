@@ -12,6 +12,12 @@ import { hasNative } from "./codex-bypass/native";
 const AUTH_FILE = path.join(os.homedir(), ".codex", "auth.json");
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_INSTRUCTIONS = "You are Codex, a coding assistant.";
+// Throttle for the usage warmup: rate-limit data changes slowly and the
+// request adds latency, so refresh at most once per minute per instance.
+const CODEX_WARMUP_THROTTLE_MS = 60 * 1000;
+// Statusline quota bar cache (scripts/statusline-opencode.sh reads this).
+// Written by the gateway because script curl cannot pass the Cloudflare check.
+const CODEX_USAGE_CACHE_FILE = "/tmp/codex-usage.json";
 
 interface CodexAuth {
   auth_mode: string;
@@ -25,6 +31,343 @@ interface CodexAuth {
   last_refresh: string;
 }
 
+/**
+ * Converts OpenAI-style Responses SSE frames to Anthropic Messages SSE.
+ * Frames are split on blank lines so truncated JSON across TCP chunks is
+ * buffered, not dropped. Unknown event types are ignored; only Anthropic
+ * events are emitted. Shared with the opencode-go transformer, whose
+ * Responses endpoints speak the same protocol.
+ */
+export class ResponsesToAnthropicStream {
+  private messageId: string;
+  private model: string;
+  private started = false;
+  private finished = false;
+  private buffer = "";
+  private nextIndex = 0;
+  private openBlocks: number[] = [];
+  private textBlock: number | null = null;
+  private thinkingBlock: number | null = null;
+  private toolByItemId = new Map<string, number>();
+  private toolByOutputIndex = new Map<number, number>();
+  private hasToolUse = false;
+  private usage: any = null;
+
+  constructor(fallbackModel: string) {
+    this.messageId = `msg_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    this.model = fallbackModel || "unknown";
+  }
+
+  push(chunk: string): string[] {
+    if (this.finished) return [];
+    this.buffer += chunk;
+    const out: string[] = [];
+    let boundary: number;
+    while ((boundary = this.buffer.indexOf("\n\n")) >= 0) {
+      const frame = this.buffer.slice(0, boundary);
+      this.buffer = this.buffer.slice(boundary + 2);
+      out.push(...this.handleFrame(frame));
+      if (this.finished) break;
+    }
+    return out;
+  }
+
+  finish(stopReason = "end_turn"): string[] {
+    if (this.finished) return [];
+    return this.finishStream(stopReason);
+  }
+
+  private handleFrame(frame: string): string[] {
+    const dataLines: string[] = [];
+    for (const line of frame.split("\n")) {
+      const trimmed = line.trimStart();
+      if (trimmed.startsWith("data:")) {
+        dataLines.push(trimmed.slice(5).trim());
+      }
+    }
+    const raw = dataLines.join("\n").trim();
+    if (!raw || raw === "[DONE]") return [];
+    try {
+      return this.handleEvent(JSON.parse(raw));
+    } catch {
+      return [];
+    }
+  }
+
+  private handleEvent(event: any): string[] {
+    const out: string[] = [];
+    const type = event?.type;
+
+    if (type === "response.created") {
+      if (event.response?.model) this.model = event.response.model;
+      if (event.response?.id) this.messageId = `msg_${event.response.id}`;
+      out.push(...this.ensureStarted());
+      return out;
+    }
+
+    if (type === "response.output_item.added") {
+      out.push(...this.ensureStarted());
+      this.openItemBlock(event.item, event.output_index, out);
+      return out;
+    }
+
+    if (type === "response.output_item.done") {
+      out.push(...this.ensureStarted());
+      const item = event.item || {};
+      if (item.type === "function_call") {
+        const index = this.ensureToolBlock(item, event.output_index, out);
+        // If the full arguments arrived without deltas, emit them so the
+        // tool_use block is not left with an empty input.
+        if (index !== null && item.arguments) {
+          out.push(
+            this.sse("content_block_delta", {
+              type: "content_block_delta",
+              index,
+              delta: { type: "input_json_delta", partial_json: item.arguments },
+            })
+          );
+        }
+      } else if (item.type === "reasoning") {
+        this.ensureThinkingBlock(out, event.output_index);
+      } else {
+        this.ensureTextBlock(out);
+      }
+      return out;
+    }
+
+    if (type === "response.output_text.delta") {
+      out.push(...this.ensureStarted());
+      this.ensureTextBlock(out);
+      if (this.textBlock !== null && event.delta) {
+        out.push(
+          this.sse("content_block_delta", {
+            type: "content_block_delta",
+            index: this.textBlock,
+            delta: { type: "text_delta", text: event.delta },
+          })
+        );
+      }
+      return out;
+    }
+
+    if (type === "response.function_call_arguments.delta") {
+      out.push(...this.ensureStarted());
+      const index = this.resolveToolBlock(event.item_id, event.output_index);
+      if (index !== null && event.delta) {
+        out.push(
+          this.sse("content_block_delta", {
+            type: "content_block_delta",
+            index,
+            delta: { type: "input_json_delta", partial_json: event.delta },
+          })
+        );
+      }
+      return out;
+    }
+
+    // Reasoning summary deltas (e.g. response.reasoning_summary_text.delta).
+    if (
+      typeof type === "string" &&
+      type.includes("reasoning") &&
+      typeof event.delta === "string" &&
+      event.delta
+    ) {
+      out.push(...this.ensureStarted());
+      this.ensureThinkingBlock(out, event.output_index);
+      if (this.thinkingBlock !== null) {
+        out.push(
+          this.sse("content_block_delta", {
+            type: "content_block_delta",
+            index: this.thinkingBlock,
+            delta: { type: "thinking_delta", thinking: event.delta },
+          })
+        );
+      }
+      return out;
+    }
+
+    if (type === "response.completed") {
+      this.usage = event.response?.usage || this.usage;
+      return this.finishStream(this.hasToolUse ? "tool_use" : "end_turn");
+    }
+
+    if (type === "response.incomplete") {
+      this.usage = event.response?.usage || this.usage;
+      const reason = event.response?.incomplete_details?.reason;
+      return this.finishStream(reason === "max_output_tokens" ? "max_tokens" : "end_turn");
+    }
+
+    if (type === "response.failed") {
+      const message =
+        event.response?.error?.message || "Codex request failed upstream.";
+      out.push(
+        this.sse("error", {
+          type: "error",
+          error: { type: "api_error", message },
+        })
+      );
+      this.finished = true;
+      return out;
+    }
+
+    return out;
+  }
+
+  private openItemBlock(item: any, outputIndex: number | undefined, out: string[]): void {
+    if (!item || typeof item !== "object") {
+      this.ensureTextBlock(out);
+      return;
+    }
+    if (item.type === "function_call") {
+      this.ensureToolBlock(item, outputIndex, out);
+      return;
+    }
+    if (item.type === "reasoning") {
+      this.ensureThinkingBlock(out, outputIndex);
+      return;
+    }
+    this.ensureTextBlock(out);
+  }
+
+  private ensureStarted(): string[] {
+    if (this.started) return [];
+    this.started = true;
+    return [
+      this.sse("message_start", {
+        type: "message_start",
+        message: {
+          id: this.messageId,
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: this.model,
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      }),
+    ];
+  }
+
+  private ensureTextBlock(out: string[]): void {
+    if (this.textBlock !== null) return;
+    const index = this.nextIndex++;
+    this.textBlock = index;
+    this.openBlocks.push(index);
+    out.push(
+      this.sse("content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: { type: "text", text: "" },
+      })
+    );
+  }
+
+  private ensureThinkingBlock(out: string[], outputIndex?: number): void {
+    if (this.thinkingBlock !== null) {
+      if (typeof outputIndex === "number") {
+        this.toolByOutputIndex.set(outputIndex, this.thinkingBlock);
+      }
+      return;
+    }
+    const index = this.nextIndex++;
+    this.thinkingBlock = index;
+    this.openBlocks.push(index);
+    if (typeof outputIndex === "number") {
+      this.toolByOutputIndex.set(outputIndex, index);
+    }
+    out.push(
+      this.sse("content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: { type: "thinking", thinking: "" },
+      })
+    );
+  }
+
+  private ensureToolBlock(item: any, outputIndex: number | undefined, out: string[]): number | null {
+    const name = item?.name;
+    if (!name) return this.resolveToolBlock(item?.id || item?.call_id, outputIndex);
+    const id = item.call_id || item.id || `toolu_${Date.now()}`;
+    if (item.id) {
+      const existing = this.toolByItemId.get(item.id);
+      if (existing !== undefined) return existing;
+    }
+    const index = this.nextIndex++;
+    this.openBlocks.push(index);
+    if (item.id) this.toolByItemId.set(item.id, index);
+    if (typeof outputIndex === "number") this.toolByOutputIndex.set(outputIndex, index);
+    this.hasToolUse = true;
+    out.push(
+      this.sse("content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: { type: "tool_use", id, name, input: {} },
+      })
+    );
+    return index;
+  }
+
+  private resolveToolBlock(itemId?: string, outputIndex?: number): number | null {
+    if (itemId && this.toolByItemId.has(itemId)) {
+      return this.toolByItemId.get(itemId)!;
+    }
+    if (typeof outputIndex === "number" && this.toolByOutputIndex.has(outputIndex)) {
+      const mapped = this.toolByOutputIndex.get(outputIndex)!;
+      // Only return tool_use blocks here; text/thinking blocks are tracked
+      // separately and must not receive input_json deltas.
+      if (mapped !== this.textBlock && mapped !== this.thinkingBlock) {
+        return mapped;
+      }
+      return null;
+    }
+    return null;
+  }
+
+  private finishStream(stopReason: string): string[] {
+    if (this.finished) return [];
+    this.finished = true;
+    const out: string[] = [];
+    out.push(...this.ensureStarted());
+    for (const index of this.openBlocks) {
+      if (index === this.thinkingBlock) {
+        out.push(
+          this.sse("content_block_delta", {
+            type: "content_block_delta",
+            index,
+            delta: { type: "signature_delta", signature: String(Date.now()) },
+          })
+        );
+      }
+      out.push(
+        this.sse("content_block_stop", { type: "content_block_stop", index })
+      );
+    }
+    this.openBlocks = [];
+    this.textBlock = null;
+    this.thinkingBlock = null;
+    const usage = this.usage || {};
+    const cachedTokens = usage.input_tokens_details?.cached_tokens || 0;
+    out.push(
+      this.sse("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: stopReason, stop_sequence: null },
+        usage: {
+          input_tokens: usage.input_tokens || 0,
+          output_tokens: usage.output_tokens || 0,
+          ...(cachedTokens ? { cache_read_input_tokens: cachedTokens } : {}),
+        },
+      })
+    );
+    out.push(this.sse("message_stop", { type: "message_stop" }));
+    return out;
+  }
+
+  private sse(event: string, data: any): string {
+    return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  }
+}
+
 export class CodexTransformer implements Transformer {
   name = "codex";
   logger?: any;
@@ -32,6 +375,7 @@ export class CodexTransformer implements Transformer {
   private cookieJar?: CookieJar;
   private fingerprintManager?: FingerprintManager;
   private baseUrl: string = DEFAULT_CODEX_BASE_URL;
+  private lastWarmupAt = 0;
 
   constructor() {
     this.cookieJar = new CookieJar(console);
@@ -118,6 +462,10 @@ export class CodexTransformer implements Transformer {
     }
 
     const encoder = new TextEncoder();
+    // Convert Codex Responses SSE to Anthropic SSE. The gateway returns our
+    // response bytes directly to Claude Code, so raw Codex events would yield
+    // zero parseable stream events client-side.
+    const converter = new ResponsesToAnthropicStream(requestBody.model || "unknown");
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
         httpPostStream(
@@ -125,21 +473,45 @@ export class CodexTransformer implements Transformer {
           headers,
           JSON.stringify(requestBody),
           (chunk, setCookies) => {
-            if (chunk) {
-              controller.enqueue(encoder.encode(chunk));
-            }
+            try {
+              if (chunk) {
+                for (const line of converter.push(chunk)) {
+                  controller.enqueue(encoder.encode(line));
+                }
+              }
 
-            if (setCookies?.length && accountId) {
-              this.cookieJar?.capture(accountId, setCookies);
-            }
+              if (setCookies?.length && accountId) {
+                this.cookieJar?.capture(accountId, setCookies);
+              }
 
-            if (!chunk && setCookies) {
-              controller.close();
+              if (!chunk && setCookies) {
+                for (const line of converter.finish()) {
+                  controller.enqueue(encoder.encode(line));
+                }
+                controller.close();
+              }
+            } catch (error) {
+              try {
+                controller.error(error);
+              } catch {
+                // Controller already closed.
+              }
             }
           },
           { timeoutSec: 60 * 5 }
         ).catch((error) => {
-          controller.error(error);
+          try {
+            for (const line of converter.finish()) {
+              controller.enqueue(encoder.encode(line));
+            }
+          } catch {
+            // Ignore conversion errors on the failure path.
+          }
+          try {
+            controller.error(error);
+          } catch {
+            // Controller already closed.
+          }
         });
       },
       cancel: () => {
@@ -187,12 +559,88 @@ export class CodexTransformer implements Transformer {
     }
 
     const normalized = this.convertSseToResponsesPayload(response.body, requestBody.model);
-    return new Response(JSON.stringify(normalized), {
+    // The gateway returns our bytes directly to Claude Code, so convert the
+    // Codex Responses payload to an Anthropic message (same pattern as the
+    // opencode-go transformer). Raw Codex JSON is "JSON but not a Message".
+    const anthropic = this.convertResponsesToAnthropic(normalized);
+    return new Response(JSON.stringify(anthropic), {
       status: 200,
       headers: {
         "content-type": "application/json",
       },
     });
+  }
+
+  private convertResponsesToAnthropic(data: any): any {
+    const content: any[] = [];
+    let hasToolUse = false;
+
+    for (const item of data.output || []) {
+      if (item?.type === "reasoning") {
+        const summary = Array.isArray(item.summary)
+          ? item.summary
+              .map((part: any) =>
+                typeof part === "string" ? part : part?.text || ""
+              )
+              .join("")
+          : "";
+        // Encrypted-only reasoning carries no visible thought; skip it rather
+        // than fabricating content. Visible summaries become thinking blocks.
+        if (summary) {
+          content.push({
+            type: "thinking",
+            thinking: summary,
+            signature: String(Date.now()),
+          });
+        }
+        continue;
+      }
+
+      if (item?.type === "message" && Array.isArray(item.content)) {
+        for (const part of item.content) {
+          if (part?.type === "output_text" && part.text) {
+            content.push({ type: "text", text: part.text });
+          }
+        }
+        continue;
+      }
+
+      if (item?.type === "function_call") {
+        let input: any = {};
+        try {
+          input = JSON.parse(item.arguments || "{}");
+        } catch {
+          input = {};
+        }
+        content.push({
+          type: "tool_use",
+          id: item.call_id || item.id || `toolu_${Date.now()}`,
+          name: item.name,
+          input,
+        });
+        hasToolUse = true;
+      }
+    }
+
+    const usage = data.usage || {};
+    return {
+      id: data.id || `msg_${Date.now()}`,
+      type: "message",
+      role: "assistant",
+      model: data.model || "unknown",
+      content: content.length > 0 ? content : [{ type: "text", text: "" }],
+      stop_reason:
+        data.status === "incomplete"
+          ? "max_tokens"
+          : hasToolUse
+            ? "tool_use"
+            : "end_turn",
+      stop_sequence: null,
+      usage: {
+        input_tokens: usage.input_tokens || 0,
+        output_tokens: usage.output_tokens || 0,
+      },
+    };
   }
 
   private convertSseToResponsesPayload(ssePayload: string, fallbackModel: string): any {
@@ -294,14 +742,30 @@ export class CodexTransformer implements Transformer {
   }
 
   private async warmupIfNeeded(accountId: string): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastWarmupAt < CODEX_WARMUP_THROTTLE_MS) {
+      return;
+    }
+    this.lastWarmupAt = now;
+
     try {
       const headers = this.fingerprintManager!.buildAnonymousHeaders();
+      const accessToken = this.codexAuth?.tokens?.access_token;
+      if (accessToken) {
+        headers["authorization"] = `Bearer ${accessToken}`;
+      }
+      if (accountId) {
+        headers["chatgpt-account-id"] = accountId;
+      }
+      // The native client does not decompress gzip; ask for identity so the
+      // JSON usage body parses.
+      delete headers["accept-encoding"];
       const cookieHeader = this.cookieJar!.getCookieHeader(accountId);
       if (cookieHeader) {
         headers["cookie"] = cookieHeader;
       }
 
-      const url = `${this.baseUrl}/codex/usage`;
+      const url = `${this.baseUrl}/usage`;
       const response: HttpResponse = await httpGet(url, headers, { timeoutSec: 15 });
 
       if (response.set_cookie_headers?.length) {
@@ -319,12 +783,43 @@ export class CodexTransformer implements Transformer {
             });
             this.logger?.info("[CODEX] Fingerprint updated:", data.app_version);
           }
+          await this.writeUsageCache(data);
         } catch (e) {
           // Ignore parse errors
         }
       }
     } catch (error) {
       this.logger?.warn("[CODEX] Warmup request failed:", error);
+    }
+  }
+
+  /**
+   * Persists Codex rate-limit usage for the statusline quota bar
+   * (scripts/statusline-opencode.sh reads this; plain curl from a script
+   * cannot pass the Cloudflare check, but the gateway native client can).
+   */
+  private async writeUsageCache(data: any): Promise<void> {
+    try {
+      const window =
+        data?.rate_limit?.primary_window || data?.rate_limit?.secondary_window;
+      if (!window || typeof window.used_percent !== "number") {
+        return;
+      }
+      const cache = {
+        fetched_at: Date.now(),
+        limit_reached: data?.rate_limit?.limit_reached === true,
+        plan_type: data?.plan_type || null,
+        reset_after_seconds:
+          typeof window.reset_after_seconds === "number"
+            ? window.reset_after_seconds
+            : null,
+        used_percent: window.used_percent,
+      };
+      const tmpFile = `${CODEX_USAGE_CACHE_FILE}.tmp`;
+      await fs.writeFile(tmpFile, JSON.stringify(cache), "utf-8");
+      await fs.rename(tmpFile, CODEX_USAGE_CACHE_FILE);
+    } catch (error) {
+      this.logger?.warn("[CODEX] Failed to write usage cache:", error);
     }
   }
 
