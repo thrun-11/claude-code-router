@@ -1,13 +1,19 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { loadPersistedAppConfig, replacePersistedAppConfig } from "@ccr/core/config/app-config-store";
-import { loadPersistedApiKeys, replacePersistedApiKeys } from "@ccr/core/config/api-key-store";
-import { CONFIG_FILE, GATEWAY_CONFIG_FILE, LEGACY_CONFIG_FILE, LEGACY_WINDOWS_CONFIG_FILE } from "@ccr/core/config/constants";
+import {
+  archiveLegacyJsonConfigFiles,
+  loadPersistedApiKeys,
+  loadPersistedAppConfig,
+  replacePersistedApiKeys,
+  replacePersistedAppConfig,
+  replacePersistedConfigSnapshot
+} from "@ccr/core/config/config-repository";
+import { LEGACY_ACTIVE_CONFIG_FILE, LEGACY_CONFIG_FILE, LEGACY_WINDOWS_CONFIG_FILE } from "@ccr/core/config/constants";
 import { normalizeCodexProviderAccountConfig } from "@ccr/core/agents/local-providers/codex";
 import { normalizeGrokProviderAccountConfig, normalizeGrokProviderMediaCapabilities } from "@ccr/core/agents/local-providers/grok";
 import { removeOpenCodeProviderAccountConfig } from "@ccr/core/agents/local-providers/opencode";
-import { CLAUDE_CODE_DEFAULT_ENV, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY_ENV, CLAUDE_DESIGN_PLUGIN_ID, CLAUDE_SHIP_PLUGIN_ID, DEFAULT_OVERVIEW_WIDGETS, DEFAULT_TRAY_COMPONENT_VARIANTS, DEFAULT_TRAY_WIDGETS, DEFAULT_TRAY_WINDOW_MODULES, GATEWAY_PLUGIN_PERMISSION_IDS, GATEWAY_PLUGIN_SURFACE_IDS, OVERVIEW_WIDGET_SIZE_VALUES, ROUTER_FALLBACK_MAX_RETRY_COUNT, ROUTER_SCRIPT_API_VERSION, ROUTER_SCRIPT_DEFAULT_TIMEOUT_MS, ROUTER_SCRIPT_MAX_TIMEOUT_MS, TRAY_SINGLETON_WIDGET_TYPES, TRAY_TOP_WIDGET_TYPES, TRAY_WINDOW_MODULE_IDS, enforceSingleEnabledGlobalProfilePerAgent, knownGatewayPluginDefaultApps, knownGatewayPluginDefaultPermissions, knownGatewayPluginDefaultSurfaces } from "@ccr/core/contracts/app";
+import { CLAUDE_CODE_DEFAULT_ENV, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY_ENV, CLAUDE_DESIGN_PLUGIN_ID, CLAUDE_SHIP_PLUGIN_ID, DEFAULT_TRAY_COMPONENT_VARIANTS, GATEWAY_PLUGIN_PERMISSION_IDS, GATEWAY_PLUGIN_SURFACE_IDS, OVERVIEW_WIDGET_SIZE_VALUES, ROUTER_FALLBACK_MAX_RETRY_COUNT, ROUTER_SCRIPT_API_VERSION, ROUTER_SCRIPT_DEFAULT_TIMEOUT_MS, ROUTER_SCRIPT_MAX_TIMEOUT_MS, TRAY_SINGLETON_WIDGET_TYPES, TRAY_TOP_WIDGET_TYPES, TRAY_WINDOW_MODULE_IDS, enforceSingleEnabledGlobalProfilePerAgent, isEnabledGlobalProfile, knownGatewayPluginDefaultApps, knownGatewayPluginDefaultPermissions, knownGatewayPluginDefaultSurfaces } from "@ccr/core/contracts/app";
 import { createDefaultAppConfig } from "@ccr/core/config/default-config";
 import { maxRequestLogBodyBytes } from "@ccr/core/observability/request-log-limits";
 import { findProviderPresetByBaseUrl, primaryProviderPresetEndpoint, providerApiKeySafetyIssue, providerEndpointCanReceiveProviderApiKey } from "@ccr/core/providers/presets/index";
@@ -32,9 +38,9 @@ import type {
   GatewayProviderCapability,
   GatewayProviderCapabilityProtocol,
   GatewayProviderConfig,
-  GatewayProviderProtocol,
   MediaToolsConfig,
   ObservabilityConfig,
+  OverviewAccountCardSize,
   OverviewMetricKind,
   OverviewWidgetConfig,
   OverviewWidgetSize,
@@ -48,6 +54,7 @@ import type {
   ProviderModelPricing,
   ProviderReasoningLevel,
   ProfileConfig,
+  ProfileRoutingConfig,
   ProfileRuntimeConfig,
   ProxyRouteTarget,
   ProxyRuntimeConfig,
@@ -99,7 +106,13 @@ type LoadedAppConfig = Partial<Omit<AppConfig, "Router" | "agent" | "botGateway"
 export type RawAppConfigSource = "default" | "legacy-json" | "sqlite";
 
 type RawAppConfigLoadResult = {
+  legacyJsonFile?: string;
   source: RawAppConfigSource;
+  value: Partial<AppConfig>;
+};
+
+type LegacyJsonConfigLoadResult = {
+  file: string;
   value: Partial<AppConfig>;
 };
 
@@ -115,8 +128,7 @@ const GENERATED_GATEWAY_API_KEY_ID = "local-gateway";
 const GATEWAY_PLUGIN_PERMISSION_ID_SET = new Set<string>(GATEWAY_PLUGIN_PERMISSION_IDS);
 
 const DEFAULT_CONFIG: AppConfig = createDefaultAppConfig({
-  coreHost: INTERNAL_GATEWAY_CORE_HOST,
-  generatedConfigFile: GATEWAY_CONFIG_FILE
+  coreHost: INTERNAL_GATEWAY_CORE_HOST
 });
 
 function completeBotGatewayConfig(config: LoadedBotGatewayConfig | undefined): BotGatewayRuntimeConfig {
@@ -280,7 +292,6 @@ export async function loadAppConfig(): Promise<AppConfig> {
         ...gatewayConfig,
         coreHost: INTERNAL_GATEWAY_CORE_HOST,
         corePort,
-        generatedConfigFile: GATEWAY_CONFIG_FILE,
         host: gatewayConfig.host ?? host,
         port: gatewayConfig.port ?? port
       },
@@ -329,11 +340,13 @@ export async function loadAppConfig(): Promise<AppConfig> {
     const shouldPersistApiKeys = loadedApiKeys.length === 0 || hasConfigFileApiKeys(rawValue) || configFileApiKeys.length > 0;
     const shouldRepairProviderCapabilities = hasUnsupportedNvidiaCapabilities(value.Providers);
     const shouldRepairKnownPlugins = pluginMigration.changed;
-    if (shouldPersistApiKeys) {
-      await replacePersistedApiKeys(apiKeys);
-    }
     if (loadedRawConfig.source !== "sqlite" || shouldPersistApiKeys || shouldRepairProviderCapabilities || shouldRepairKnownPlugins) {
-      await writeSanitizedConfig(config);
+      await replacePersistedConfigSnapshot(sanitizeConfigForDisk(config), apiKeys);
+    }
+    if (loadedRawConfig.source === "legacy-json" && loadedRawConfig.legacyJsonFile) {
+      await archiveLegacyJsonConfigFiles([loadedRawConfig.legacyJsonFile]).catch((archiveError) => {
+        console.warn(`[config] Failed to archive legacy JSON config: ${formatError(archiveError)}`);
+      });
     }
     return config;
   } catch (error) {
@@ -381,14 +394,13 @@ async function saveAppConfigNow(config: AppConfig): Promise<AppConfig> {
   assertProviderApiKeysAreSafe(normalizedConfig);
   const apiKeys = ensureGatewayApiKeys(normalizeApiKeys(normalizedConfig.APIKEYS, normalizedConfig.APIKEY).filter((apiKey) => !isDefaultSeedApiKey(apiKey)));
   const pluginMigration = migrateKnownGatewayPluginConfigs(normalizedConfig.plugins);
-  await replacePersistedApiKeys(apiKeys);
-  await writeSanitizedConfig({
+  await replacePersistedConfigSnapshot(sanitizeConfigForDisk({
     ...normalizedConfig,
     theme: appThemePreferenceOverride ?? normalizedConfig.theme,
     APIKEY: apiKeys[0]?.key ?? "",
     APIKEYS: apiKeys,
     plugins: pluginMigration.plugins
-  });
+  }), apiKeys);
   return loadAppConfig();
 }
 
@@ -409,13 +421,83 @@ function enqueueAppConfigWrite<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 function withSingleEnabledGlobalProfiles(config: AppConfig): AppConfig {
+  const profiles = enforceSingleEnabledGlobalProfilePerAgent(config.profile.profiles);
   return {
     ...config,
     Providers: config.Providers.map(normalizeProviderPresetCapabilities),
-    profile: {
+    profile: synchronizeLegacyProfileConfig({
       ...config.profile,
-      profiles: enforceSingleEnabledGlobalProfilePerAgent(config.profile.profiles)
-    }
+      profiles
+    })
+  };
+}
+
+function synchronizeLegacyProfileConfig(profile: AppConfig["profile"]): AppConfig["profile"] {
+  const profiles = enforceSingleEnabledGlobalProfilePerAgent(profile.profiles);
+  const profileEnabled = profile.enabled !== false && profiles.some((item) => item.enabled);
+  const claudeCodeProfile = profileEnabled ? activeGlobalProfile(profiles, "claude-code") : undefined;
+  const codexProfile = profileEnabled ? activeGlobalProfile(profiles, "codex") : undefined;
+
+  return {
+    ...profile,
+    enabled: profileEnabled,
+    claudeCode: synchronizeLegacyClaudeCodeProfile(profile.claudeCode, claudeCodeProfile),
+    codex: synchronizeLegacyCodexProfile(profile.codex, codexProfile),
+    profiles
+  };
+}
+
+function activeGlobalProfile(profiles: ProfileConfig[], agent: ProfileConfig["agent"]): ProfileConfig | undefined {
+  return profiles.find((profile) => profile.agent === agent && isEnabledGlobalProfile(profile));
+}
+
+function synchronizeLegacyClaudeCodeProfile(
+  legacy: ClaudeCodeProfileConfig,
+  profile: ProfileConfig | undefined
+): ClaudeCodeProfileConfig {
+  if (!profile) {
+    return {
+      ...legacy,
+      enabled: false
+    };
+  }
+  return {
+    ...legacy,
+    enabled: true,
+    fableModel: profile.fableModel ?? legacy.fableModel,
+    haikuModel: profile.haikuModel ?? legacy.haikuModel,
+    managedCompact: profile.managedCompact ?? legacy.managedCompact,
+    model: profile.model,
+    opusModel: profile.opusModel ?? legacy.opusModel,
+    settingsFile: profile.settingsFile ?? legacy.settingsFile,
+    sonnetModel: profile.sonnetModel ?? legacy.sonnetModel,
+    smallFastModel: profile.smallFastModel ?? legacy.smallFastModel
+  };
+}
+
+function synchronizeLegacyCodexProfile(
+  legacy: CodexProfileConfig,
+  profile: ProfileConfig | undefined
+): CodexProfileConfig {
+  if (!profile) {
+    return {
+      ...legacy,
+      enabled: false
+    };
+  }
+  return {
+    ...legacy,
+    cliMiddleware: profile.cliMiddleware ?? legacy.cliMiddleware,
+    codexCliPath: profile.codexCliPath ?? legacy.codexCliPath,
+    codexHome: profile.codexHome ?? legacy.codexHome,
+    configFormat: profile.configFormat ?? legacy.configFormat,
+    configFile: profile.configFile ?? legacy.configFile,
+    enabled: true,
+    managedCompact: profile.managedCompact ?? legacy.managedCompact,
+    model: profile.model,
+    providerId: profile.providerId ?? legacy.providerId,
+    providerName: profile.providerName ?? legacy.providerName,
+    showAllSessions: profile.showAllSessions ?? legacy.showAllSessions
   };
 }
 
@@ -444,6 +526,10 @@ export function normalizeProviderPresetCapabilitiesForTest(
   provider: GatewayProviderConfig
 ): GatewayProviderConfig {
   return normalizeProviderPresetCapabilities(provider);
+}
+
+export function parseProvidersForTest(value: unknown): GatewayProviderConfig[] | undefined {
+  return parseProviders(value);
 }
 
 function hasUnsupportedNvidiaCapabilities(value: unknown): boolean {
@@ -593,8 +679,9 @@ async function loadRawAppConfig(): Promise<RawAppConfigLoadResult> {
   const legacyConfig = readLegacyJsonConfig();
   if (legacyConfig) {
     return {
+      legacyJsonFile: legacyConfig.file,
       source: "legacy-json",
-      value: legacyConfig
+      value: legacyConfig.value
     };
   }
 
@@ -604,8 +691,8 @@ async function loadRawAppConfig(): Promise<RawAppConfigLoadResult> {
   };
 }
 
-function readLegacyJsonConfig(): Partial<AppConfig> | undefined {
-  const files = uniqueStrings([CONFIG_FILE, LEGACY_WINDOWS_CONFIG_FILE, LEGACY_CONFIG_FILE]);
+function readLegacyJsonConfig(): LegacyJsonConfigLoadResult | undefined {
+  const files = uniqueStrings([LEGACY_ACTIVE_CONFIG_FILE, LEGACY_WINDOWS_CONFIG_FILE, LEGACY_CONFIG_FILE]);
   for (const file of files) {
     if (!existsSync(file)) {
       continue;
@@ -613,7 +700,10 @@ function readLegacyJsonConfig(): Partial<AppConfig> | undefined {
     try {
       const parsed = JSON.parse(readFileSync(file, "utf8")) as unknown;
       if (isObject(parsed)) {
-        return parsed as Partial<AppConfig>;
+        return {
+          file,
+          value: parsed as Partial<AppConfig>
+        };
       }
       console.warn(`[config] Ignoring legacy config with non-object root: ${file}`);
     } catch (error) {
@@ -642,14 +732,15 @@ function sanitizeConfigForDisk(config: AppConfig): AppConfig {
 }
 
 function sanitizeProfileConfigForDisk(profile: AppConfig["profile"]): AppConfig["profile"] {
-  const { remoteFrontendMode: _remoteFrontendMode, ...codex } = profile.codex as AppConfig["profile"]["codex"] & {
+  const synchronizedProfile = synchronizeLegacyProfileConfig(profile);
+  const { remoteFrontendMode: _remoteFrontendMode, ...codex } = synchronizedProfile.codex as AppConfig["profile"]["codex"] & {
     remoteFrontendMode?: unknown;
   };
   return {
-    ...profile,
+    ...synchronizedProfile,
     codex,
-    profiles: profile.profiles.map((profileItem) => {
-      if (profileItem.agent !== "codex" && profileItem.agent !== "opencode" && profileItem.agent !== "zcode") {
+    profiles: synchronizedProfile.profiles.map((profileItem) => {
+      if (profileItem.agent !== "codex" && profileItem.agent !== "opencode" && profileItem.agent !== "kilo" && profileItem.agent !== "workbuddy" && profileItem.agent !== "zcode") {
         return profileItem;
       }
       const {
@@ -999,9 +1090,14 @@ function parseOverviewWidget(value: unknown): OverviewWidgetConfig | undefined {
     return undefined;
   }
   const metric = type === "metric" ? parseOverviewMetricKind(value.metric) ?? "requests" : undefined;
-  const accountProvider = type === "account-balance" ? readString(value.accountProvider) : undefined;
+  const accountProviders = type === "account-balance" ? parseOverviewAccountProviders(value) : [];
+  const accountCardOrder = type === "account-balance" ? parseOverviewAccountCardOrder(value.accountCardOrder) : [];
+  const accountCardSizes = type === "account-balance" ? parseOverviewAccountCardSizes(value.accountCardSizes) : undefined;
   return {
-    ...(accountProvider ? { accountProvider } : {}),
+    ...(accountCardOrder.length > 0 ? { accountCardOrder } : {}),
+    ...(accountCardSizes ? { accountCardSizes } : {}),
+    ...(accountProviders.length === 1 ? { accountProvider: accountProviders[0] } : {}),
+    ...(accountProviders.length > 0 ? { accountProviders } : {}),
     enabled: typeof value.enabled === "boolean" ? value.enabled : true,
     id: readString(value.id) || overviewWidgetId(type, metric),
     ...(metric ? { metric } : {}),
@@ -1009,6 +1105,43 @@ function parseOverviewWidget(value: unknown): OverviewWidgetConfig | undefined {
     type,
     variant: parseOverviewWidgetVariant(value.variant) ?? defaultOverviewWidgetVariant(type)
   };
+}
+
+function parseOverviewAccountProviders(value: Record<string, unknown>): string[] {
+  const accountProvider = readString(value.accountProvider);
+  return uniqueStrings([
+    ...parseStringList(value.accountProviders),
+    ...(accountProvider ? [accountProvider] : [])
+  ]);
+}
+
+function parseOverviewAccountCardOrder(value: unknown): string[] {
+  return uniqueStrings(parseStringList(value));
+}
+
+function parseOverviewAccountCardSizes(value: unknown): Record<string, OverviewAccountCardSize> | undefined {
+  if (!isObject(value)) {
+    return undefined;
+  }
+  const sizes: Record<string, OverviewAccountCardSize> = {};
+  for (const [key, rawSize] of Object.entries(value)) {
+    const accountKey = key.trim();
+    const size = parseOverviewAccountCardSize(rawSize);
+    if (accountKey && size) {
+      sizes[accountKey] = size;
+    }
+  }
+  return Object.keys(sizes).length > 0 ? sizes : undefined;
+}
+
+function parseOverviewAccountCardSize(value: unknown): OverviewAccountCardSize | undefined {
+  if (value === "small") {
+    return "1:1";
+  }
+  if (value === "large") {
+    return "1:2";
+  }
+  return parseEnumValue(value, ["1:1", "1:2", "2:1", "2:2"], undefined);
 }
 
 function parseOverviewWidgetType(value: unknown): OverviewWidgetType | undefined {
@@ -1294,13 +1427,16 @@ function parseProviders(value: unknown): GatewayProviderConfig[] | undefined {
         baseUrl: readString(item.baseUrl),
         baseurl: readString(item.baseurl),
         billing: item.billing,
-        capabilities: parseProviderCapabilities(item.capabilities),
+        capabilities: parseProviderCapabilities(item.capabilities)
+          ?? parseProviderProtocolCapability(item),
         credentials: parseProviderCredentials(item.credentials ?? item.keys ?? item.apiKeys),
         extraBody: item.extraBody,
         extraHeaders: item.extraHeaders,
         icon: readString(item.icon),
         id: readString(item.id),
         enabled: item.enabled === false ? false : undefined,
+        autoFetchModels: readBoolean(item.autoFetchModels ?? item.auto_fetch_models ?? item.autoRefreshModels ?? item.auto_refresh_models),
+        autoFetchKnownModels: parseStringArray(item.autoFetchKnownModels ?? item.auto_fetch_known_models ?? item.autoRefreshKnownModels ?? item.auto_refresh_known_models),
         modelDescriptions,
         modelDisplayNames,
         modelMetadata,
@@ -1381,12 +1517,15 @@ function parseProviderModelMetadata(value: unknown): ProviderModelMetadata | und
   const contextWindow = readPositiveInteger(value.contextWindow ?? value.context_window);
   const effectiveContextWindowPercent = readPercentage(value.effectiveContextWindowPercent ?? value.effective_context_window_percent);
   const maxContextWindow = readPositiveInteger(value.maxContextWindow ?? value.max_context_window);
+  const maxOutputTokens = readPositiveInteger(value.maxOutputTokens ?? value.max_output_tokens ?? value.outputTokens ?? value.output_tokens);
+  const openRouterDiscountRouting = parseOpenRouterDiscountRouting(value.openRouterDiscountRouting ?? value.open_router_discount_routing);
   const pricing = parseProviderModelPricing(value.pricing);
   const metadata: ProviderModelMetadata = {
     ...(Array.isArray(value.additionalSpeedTiers) ? { additionalSpeedTiers: value.additionalSpeedTiers } : {}),
     ...(Array.isArray(value.additional_speed_tiers) ? { additionalSpeedTiers: value.additional_speed_tiers } : {}),
     ...(capabilities ? { capabilities } : {}),
     ...(contextWindow ? { contextWindow } : {}),
+    ...(value.contextWindowPinned === true || value.context_window_pinned === true ? { contextWindowPinned: true } : {}),
     ...(value.defaultReasoningLevel === null ? { defaultReasoningLevel: null } : {}),
     ...(readString(value.defaultReasoningLevel) ? { defaultReasoningLevel: readString(value.defaultReasoningLevel) } : {}),
     ...(value.default_reasoning_level === null ? { defaultReasoningLevel: null } : {}),
@@ -1395,14 +1534,46 @@ function parseProviderModelMetadata(value: unknown): ProviderModelMetadata | und
     ...(readString(value.default_reasoning_summary) ? { defaultReasoningSummary: readString(value.default_reasoning_summary) } : {}),
     ...(effectiveContextWindowPercent ? { effectiveContextWindowPercent } : {}),
     ...(maxContextWindow ? { maxContextWindow } : {}),
+    ...(maxOutputTokens ? { maxOutputTokens } : {}),
+    ...(openRouterDiscountRouting ? { openRouterDiscountRouting } : {}),
     ...(pricing ? { pricing } : {}),
     ...(Array.isArray(value.serviceTiers) ? { serviceTiers: value.serviceTiers } : {}),
     ...(Array.isArray(value.service_tiers) ? { serviceTiers: value.service_tiers } : {}),
+    ...(typeof value.supportsFastMode === "boolean" ? { supportsFastMode: value.supportsFastMode } : {}),
+    ...(typeof value.supports_fast_mode === "boolean" ? { supportsFastMode: value.supports_fast_mode } : {}),
     ...(supportedReasoningLevels ? { supportedReasoningLevels } : {}),
     ...(typeof value.supportsReasoningSummaries === "boolean" ? { supportsReasoningSummaries: value.supportsReasoningSummaries } : {}),
     ...(typeof value.supports_reasoning_summaries === "boolean" ? { supportsReasoningSummaries: value.supports_reasoning_summaries } : {})
   };
   return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+function parseOpenRouterDiscountRouting(value: unknown): ProviderModelMetadata["openRouterDiscountRouting"] {
+  if (value === true) {
+    return { enabled: true };
+  }
+  if (value === false || !isObject(value)) {
+    return undefined;
+  }
+  const providerBlacklist = parseStringList(value.providerBlacklist ?? value.provider_blacklist ?? value.ignoredProviders ?? value.ignored_providers ?? value.ignore);
+  const routing: NonNullable<ProviderModelMetadata["openRouterDiscountRouting"]> = {
+    ...(typeof value.allowFallbacks === "boolean" ? { allowFallbacks: value.allowFallbacks } : {}),
+    ...(typeof value.allow_fallbacks === "boolean" ? { allowFallbacks: value.allow_fallbacks } : {}),
+    ...(readNonNegativeNumber(value.cacheHitRate ?? value.cache_hit_rate) !== undefined ? { cacheHitRate: readNonNegativeNumber(value.cacheHitRate ?? value.cache_hit_rate) } : {}),
+    ...(typeof value.enabled === "boolean" ? { enabled: value.enabled } : {}),
+    ...(readPositiveInteger(value.endpointTtlMs ?? value.endpoint_ttl_ms ?? value.priceTtlMs ?? value.price_ttl_ms) ? { endpointTtlMs: readPositiveInteger(value.endpointTtlMs ?? value.endpoint_ttl_ms ?? value.priceTtlMs ?? value.price_ttl_ms) } : {}),
+    ...(readPositiveInteger(value.minOutputTokens ?? value.min_output_tokens) ? { minOutputTokens: readPositiveInteger(value.minOutputTokens ?? value.min_output_tokens) } : {}),
+    ...(readNonNegativeNumber(value.minSavingsRatio ?? value.min_savings_ratio) !== undefined ? { minSavingsRatio: readNonNegativeNumber(value.minSavingsRatio ?? value.min_savings_ratio) } : {}),
+    ...(readNonNegativeNumber(value.minSavingsUsd ?? value.min_savings_usd) !== undefined ? { minSavingsUsd: readNonNegativeNumber(value.minSavingsUsd ?? value.min_savings_usd) } : {}),
+    ...(readNonNegativeNumber(value.minUptime5m ?? value.min_uptime_5m) !== undefined ? { minUptime5m: readNonNegativeNumber(value.minUptime5m ?? value.min_uptime_5m) } : {}),
+    ...(readNonNegativeNumber(value.outputTokenRatio ?? value.output_token_ratio) !== undefined ? { outputTokenRatio: readNonNegativeNumber(value.outputTokenRatio ?? value.output_token_ratio) } : {}),
+    ...(providerBlacklist.length > 0 ? { providerBlacklist } : {}),
+    ...(typeof value.requireParameters === "boolean" ? { requireParameters: value.requireParameters } : {}),
+    ...(typeof value.require_parameters === "boolean" ? { requireParameters: value.require_parameters } : {}),
+    ...(typeof value.respectExistingProviderOrder === "boolean" ? { respectExistingProviderOrder: value.respectExistingProviderOrder } : {}),
+    ...(typeof value.respect_existing_provider_order === "boolean" ? { respectExistingProviderOrder: value.respect_existing_provider_order } : {})
+  };
+  return Object.keys(routing).length > 0 ? routing : undefined;
 }
 
 function parseProviderModelCapabilities(value: unknown): ProviderModelCapabilities | undefined {
@@ -1599,6 +1770,21 @@ function parseProviderCapabilities(value: unknown): GatewayProviderCapability[] 
     .filter((item): item is GatewayProviderCapability => Boolean(item));
 
   return capabilities.length > 0 ? capabilities : undefined;
+}
+
+// Local-agent login imports (e.g. Codex API) declare their protocol at the top
+// level of the provider payload instead of inside a capabilities array. When no
+// explicit capabilities are configured, translate that protocol into a single
+// capability so the gateway picks the correct upstream adapter. Without this,
+// an openai_responses provider silently falls back to the chat-completions
+// adapter and every request 404s against Responses-only backends.
+function parseProviderProtocolCapability(item: Record<string, unknown>): GatewayProviderCapability[] | undefined {
+  const type = parseProviderCapabilityProtocol(readString(item.protocol));
+  const baseUrl = readString(item.baseUrl) || readString(item.baseurl) || readString(item.api_base_url);
+  if (!type || !baseUrl) {
+    return undefined;
+  }
+  return [{ baseUrl, type }];
 }
 
 function parseProviderCapabilityProtocol(value: string | undefined): GatewayProviderCapabilityProtocol | undefined {
@@ -2765,34 +2951,50 @@ function migratedClaudeShipPluginConfig(source: GatewayPluginConfig): GatewayPlu
 }
 
 export function claudeDesignRuntimePluginConfig(): GatewayPluginConfig | undefined {
+  return claudeProductRuntimePluginConfig(CLAUDE_DESIGN_PLUGIN_ID);
+}
+
+export function claudeShipRuntimePluginConfig(): GatewayPluginConfig | undefined {
+  return claudeProductRuntimePluginConfig(CLAUDE_SHIP_PLUGIN_ID);
+}
+
+function claudeProductRuntimePluginConfig(pluginId: string): GatewayPluginConfig | undefined {
   if (!isDesktopAppRuntime()) {
     return undefined;
   }
-  const modulePath = resolveBundledOrExternalizedPluginModule(CLAUDE_DESIGN_PLUGIN_ID, undefined);
+  const modulePath = resolveBundledOrExternalizedPluginModule(pluginId, undefined);
   if (!modulePath) {
     return undefined;
   }
   return {
-    apps: knownGatewayPluginDefaultApps(CLAUDE_DESIGN_PLUGIN_ID),
+    apps: knownGatewayPluginDefaultApps(pluginId),
     enabled: true,
-    id: CLAUDE_DESIGN_PLUGIN_ID,
+    id: pluginId,
     module: modulePath,
-    permissions: knownGatewayPluginDefaultPermissions(CLAUDE_DESIGN_PLUGIN_ID),
-    surfaces: knownGatewayPluginDefaultSurfaces(CLAUDE_DESIGN_PLUGIN_ID)
+    permissions: knownGatewayPluginDefaultPermissions(pluginId),
+    surfaces: knownGatewayPluginDefaultSurfaces(pluginId)
   };
 }
 
 export function withClaudeDesignRuntimePluginConfig(config: AppConfig): AppConfig {
-  const existingIndex = config.plugins.findIndex((plugin) => plugin.enabled !== false && plugin.id === CLAUDE_DESIGN_PLUGIN_ID);
+  return withClaudeProductRuntimePluginConfig(config, CLAUDE_DESIGN_PLUGIN_ID, "Claude Design");
+}
+
+export function withClaudeShipRuntimePluginConfig(config: AppConfig): AppConfig {
+  return withClaudeProductRuntimePluginConfig(config, CLAUDE_SHIP_PLUGIN_ID, "Claude Ship");
+}
+
+function withClaudeProductRuntimePluginConfig(config: AppConfig, pluginId: string, productName: string): AppConfig {
+  const existingIndex = config.plugins.findIndex((plugin) => plugin.enabled !== false && plugin.id === pluginId);
   if (existingIndex >= 0 && config.plugins[existingIndex]?.module?.trim()) {
     return config;
   }
   if (!isDesktopAppRuntime()) {
-    throw new Error("Claude Design is only available in CCR Desktop.");
+    throw new Error(`${productName} is only available in CCR Desktop.`);
   }
-  const plugin = claudeDesignRuntimePluginConfig();
+  const plugin = claudeProductRuntimePluginConfig(pluginId);
   if (!plugin) {
-    throw new Error("Claude Design runtime module was not found. Rebuild app assets so the bundled Claude Design plugin is copied into the Electron dist.");
+    throw new Error(`${productName} runtime module was not found. Rebuild app assets so the bundled ${productName} plugin is copied into the Electron dist.`);
   }
   if (existingIndex >= 0) {
     const existing = config.plugins[existingIndex];
@@ -3118,6 +3320,11 @@ function gatewayPluginPermissionAlias(value: string): string {
     case "route":
     case "routes":
       return "gateway-routes";
+    case "gateway-request-transform":
+    case "gateway-request-transforms":
+    case "request-transform":
+    case "request-transforms":
+      return "gateway-request-transforms";
     case "proxy":
     case "proxy-route":
       return "proxy-routes";
@@ -3397,15 +3604,15 @@ function parseProfiles(value: unknown): ProfileConfig[] | undefined {
       const id = readString(item.id) || `profile-${index + 1}`;
       const name = readString(item.name) || defaultProfileAgentName(agent);
       const model = readString(item.model) ?? "";
-      const availableModels = uniqueStrings([
-        model,
-        ...parseStringList(item.availableModels ?? item.available_models ?? item.models)
-      ]);
+      const parsedAvailableModels = parseStringList(item.availableModels ?? item.available_models ?? item.models);
+      const availableModels = parsedAvailableModels.length > 0
+        ? uniqueStrings([model, ...parsedAvailableModels].filter(Boolean))
+        : undefined;
       const env = parseStringRecord(item.env) ?? {};
       const parsedSurface = parseProfileSurface(readString(item.surface) || readString(item.entry) || readString(item.frontend)) || "auto";
-      const surface = agent === "zcode" || agent === CLAUDE_DESIGN_PLUGIN_ID
+      const surface = agent === "workbuddy" || agent === "zcode" || agent === CLAUDE_DESIGN_PLUGIN_ID
         ? "app"
-        : agent === "pi"
+        : agent === "pi" || agent === "kilo"
           ? "cli"
           : parsedSurface;
       const botConfigId = surface !== "cli"
@@ -3414,6 +3621,7 @@ function parseProfiles(value: unknown): ProfileConfig[] | undefined {
       const parsedBotGateway = parseBotGateway(item.botGateway ?? item.bot_gateway ?? item.bot);
       const botGateway = surface !== "cli" && parsedBotGateway ? completeBotGatewayConfig(parsedBotGateway) : undefined;
       const managedCompact = readManagedCompact(item);
+      const routing = parseProfileRouting(item.routing ?? item.route, agent);
 
       if (agent === "claude-code") {
         const appPath = readProfileAppPath(item, agent);
@@ -3428,9 +3636,11 @@ function parseProfiles(value: unknown): ProfileConfig[] | undefined {
           haikuModel: readString(item.haikuModel) || readString(item.defaultHaikuModel) || readString(item.smallFastModel) || readString(item.smallModel) || "",
           id,
           ...(managedCompact !== undefined ? { managedCompact } : {}),
+          ...(availableModels ? { availableModels } : {}),
           model,
           name,
           opusModel: readString(item.opusModel) || readString(item.defaultOpusModel) || "",
+          ...(routing ? { routing } : {}),
           scope: parseProfileScope(readString(item.scope) || readString(item.applyScope) || readString(item.effectScope)) || "global",
           settingsFile: readString(item.settingsFile) || readString(item.configFile) || "~/.claude/settings.json",
           sonnetModel: readString(item.sonnetModel) || readString(item.defaultSonnetModel) || "",
@@ -3442,12 +3652,13 @@ function parseProfiles(value: unknown): ProfileConfig[] | undefined {
       if (agent === "grok" || agent === "kimi" || agent === "pi") {
         return {
           agent,
-          ...(agent === "kimi" ? { availableModels } : {}),
+          ...(availableModels ? { availableModels } : {}),
           enabled,
           env: codexCompatibleProfileEnv(env),
           id,
           model,
           name,
+          ...(routing ? { routing } : {}),
           scope: "ccr",
           surface: "cli"
         };
@@ -3461,12 +3672,20 @@ function parseProfiles(value: unknown): ProfileConfig[] | undefined {
           id,
           model: "",
           name,
+          ...(routing ? { routing } : {}),
           scope: "ccr",
           surface: "app"
         };
       }
 
       const appPath = readProfileAppPath(item, agent);
+      const showAllSessions = agent === "zcode" || agent === "opencode" || agent === "kilo" || agent === "workbuddy"
+        ? false
+        : typeof item.showAllSessions === "boolean"
+          ? item.showAllSessions
+          : typeof item.show_all_sessions === "boolean"
+            ? item.show_all_sessions
+            : undefined;
       return {
         agent,
         ...(appPath ? { appPath } : {}),
@@ -3481,23 +3700,57 @@ function parseProfiles(value: unknown): ProfileConfig[] | undefined {
         env: codexCompatibleProfileEnv(env),
         id,
         ...(managedCompact !== undefined ? { managedCompact } : {}),
+        ...(availableModels ? { availableModels } : {}),
         model,
         name,
         providerId: readString(item.providerId) || readString(item.provider) || "claude-code-router",
         providerName: readString(item.providerName) || "Claude Code Router",
         remoteFrontendMode: parseCodexRemoteFrontendMode(readString(item.remoteFrontendMode) || readString(item.frontendMode) || readString(item.coreMode)) || "app",
+        ...(routing ? { routing } : {}),
         scope: parseProfileScope(readString(item.scope) || readString(item.applyScope) || readString(item.effectScope)) || "global",
-        showAllSessions: agent === "zcode" || agent === "opencode"
-          ? false
-          : typeof item.showAllSessions === "boolean"
-            ? item.showAllSessions
-            : typeof item.show_all_sessions === "boolean"
-              ? item.show_all_sessions
-              : false,
+        ...(showAllSessions !== undefined ? { showAllSessions } : {}),
         surface
       };
     })
     .filter((item): item is ProfileConfig => Boolean(item));
+}
+
+function parseProfileRouting(value: unknown, _agent: ProfileConfig["agent"]): ProfileRoutingConfig | undefined {
+  if (value === false) {
+    return {
+      enabled: false,
+      enhancedRoute: true,
+      rules: []
+    };
+  }
+  if (value === true) {
+    return {
+      enabled: true,
+      enhancedRoute: true,
+      rules: []
+    };
+  }
+  if (!isObject(value)) {
+    return undefined;
+  }
+
+  const enhancedRoute = readBoolean(
+    value.enhancedRoute ??
+    value.useEnhancedRoute ??
+    value.builtInRoute ??
+    value.builtinRoute ??
+    value.useBuiltInRoute ??
+    value.use_builtin_route
+  );
+  return {
+    enabled: readBoolean(value.enabled) ?? true,
+    enhancedRoute: enhancedRoute ?? true,
+    rules: parseRouterRules(value.rules) ?? []
+  };
+}
+
+function readBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function readProfileAppPath(item: Record<string, unknown>, agent: ProfileConfig["agent"]): string | undefined {
@@ -3511,7 +3764,9 @@ function readProfileAppPath(item: Record<string, unknown>, agent: ProfileConfig[
         ? readString(item.chatgptAppPath) || readString(item.chatgpt_app_path) || readString(item.codexAppPath) || readString(item.codex_app_path)
         : agent === "opencode"
           ? readString(item.openCodeAppPath) || readString(item.opencodeAppPath) || readString(item.opencode_app_path)
-        : readString(item.zcodeAppPath) || readString(item.zcode_app_path));
+          : agent === "workbuddy"
+            ? readString(item.workbuddyAppPath) || readString(item.workbuddy_app_path) || readString(item.workBuddyAppPath) || readString(item.work_buddy_app_path)
+            : readString(item.zcodeAppPath) || readString(item.zcode_app_path));
 }
 
 function parseProfileAgent(value: unknown): ProfileConfig["agent"] | undefined {
@@ -3534,8 +3789,14 @@ function parseProfileAgent(value: unknown): ProfileConfig["agent"] | undefined {
   if (normalized === "opencode" || normalized === "open-code" || normalized === "open code") {
     return "opencode";
   }
+  if (normalized === "kilo" || normalized === "kilo-cli" || normalized === "kilo cli" || normalized === "kilocode" || normalized === "kilo-code" || normalized === "kilo code") {
+    return "kilo";
+  }
   if (normalized === "pi" || normalized === "pi-agent" || normalized === "pi agent" || normalized === "pi-coding-agent" || normalized === "pi coding agent") {
     return "pi";
+  }
+  if (normalized === "workbuddy" || normalized === "work-buddy" || normalized === "work buddy" || normalized === "workbuddy-agent" || normalized === "workbuddy agent") {
+    return "workbuddy";
   }
   if (normalized === "zcode" || normalized === "z-code" || normalized === "z code") {
     return "zcode";
@@ -3572,8 +3833,14 @@ function defaultProfileAgentName(agent: ProfileConfig["agent"]): string {
   if (agent === "opencode") {
     return "OpenCode";
   }
+  if (agent === "kilo") {
+    return "Kilo CLI";
+  }
   if (agent === "pi") {
     return "Pi";
+  }
+  if (agent === "workbuddy") {
+    return "Workbuddy";
   }
   if (agent === CLAUDE_DESIGN_PLUGIN_ID) {
     return "Claude Design";
@@ -3586,11 +3853,15 @@ function defaultCodexConfigFile(agent: ProfileConfig["agent"]): string {
     ? "~/.zcode/cli/config.json"
     : agent === "opencode"
       ? "~/.config/opencode/opencode.jsonc"
-      : agent === "pi"
-        ? "~/.pi/agent"
-        : agent === CLAUDE_DESIGN_PLUGIN_ID
-          ? "~/.claude-code-router/claude-design"
-          : "~/.codex/config.toml";
+      : agent === "kilo"
+        ? "~/.config/kilo/kilo.jsonc"
+        : agent === "workbuddy"
+          ? "~/.workbuddy/config.toml"
+        : agent === "pi"
+          ? "~/.pi/agent"
+          : agent === CLAUDE_DESIGN_PLUGIN_ID
+            ? "~/.claude-code-router/claude-design"
+            : "~/.codex/config.toml";
 }
 
 function normalizeCodexConfigFileForAgent(agent: ProfileConfig["agent"], value: string | undefined): string {

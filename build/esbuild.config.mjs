@@ -47,7 +47,7 @@ export const electronRendererOutDir = path.join(electronDistDir, "renderer");
 export const runtimeRendererOutDirs = [cliRendererOutDir, coreRendererOutDir, electronRendererOutDir];
 export const appAssetsDir = path.join(electronDistDir, "assets");
 export const rendererAssetsDir = path.join(rendererOutDir, "assets");
-export const bundledClaudeRuntimePluginIds = ["claude-design", "claude-ship"];
+export const bundledClaudeRuntimePluginIds = ["claude-design", "claude-ship", "new-api-account"];
 export const bundledClaudeRuntimePluginsInputDir = path.join(electronRoot, "bundled-plugins");
 export const electronBundledRuntimePluginsDir = path.join(electronDistDir, "bundled-plugins");
 export const appAssetsInput = path.join(electronRoot, "assets");
@@ -66,7 +66,10 @@ export const trayRendererHtmlOutput = path.join(rendererOutDir, "pages", "tray",
 export const cssInput = path.join(rendererRoot, "styles", "globals.css");
 export const cssOutput = path.join(rendererAssetsDir, "main.css");
 export const webClientBridgeOutput = path.join(rendererAssetsDir, "web-client-bridge.js");
+export const requestLogBodyWorkerOutput = path.join(rendererAssetsDir, "log-body.worker.js");
+export const requestLogBodyWorkerInput = path.join(rendererRoot, "pages", "home", "shared", "log-body.worker.ts");
 export const electronUndiciProxyAgentInput = path.join(coreSourceRoot, "proxy", "undici-proxy-agent.ts");
+export const localAgentAuthProviderHookInput = path.join(coreSourceRoot, "gateway", "core-runtime", "local-agent-auth-provider-hook.ts");
 export const upstreamHeaderSanitizerInput = path.join(coreSourceRoot, "gateway", "core-runtime", "upstream-header-sanitizer.ts");
 export const upstreamMinOutputTokensInput = path.join(coreSourceRoot, "gateway", "core-runtime", "upstream-min-output-tokens.ts");
 const lightweightMcpBundleNames = ["browser-web-search-proxy-mcp.js", "fusion-vision-mcp.js", "fusion-tool-fallback-mcp.js", "media-tools-proxy-mcp.js"];
@@ -227,6 +230,7 @@ export function createMainBuildOptions({ mode = "production", plugins = [] } = {
       path.join(electronSourceRoot, "main", "main.ts"),
       path.join(electronSourceRoot, "main", "browser-preload.ts"),
       gatewayRuntimeInput,
+      path.join(coreSourceRoot, "gateway", "core-runtime", "gateway-bootstrap.ts"),
       path.join(coreSourceRoot, "mcp", "browser-web-search-proxy-mcp.ts"),
       path.join(coreSourceRoot, "mcp", "fusion-vision-mcp.ts"),
       path.join(coreSourceRoot, "mcp", "fusion-tool-fallback-mcp.ts"),
@@ -234,6 +238,7 @@ export function createMainBuildOptions({ mode = "production", plugins = [] } = {
       path.join(coreSourceRoot, "mcp", "toolhub-mcp.ts"),
       path.join(coreSourceRoot, "observability", "request-log-worker.ts"),
       path.join(coreSourceRoot, "routing", "route-script-worker.ts"),
+      localAgentAuthProviderHookInput,
       upstreamHeaderSanitizerInput,
       upstreamMinOutputTokensInput,
       electronUndiciProxyAgentInput,
@@ -260,12 +265,14 @@ export function createCliBuildOptions({ mode = "production", plugins = [] } = {}
     entryNames: "[name]",
     entryPoints: [
       path.join(cliSourceRoot, "cli.ts"),
+      path.join(coreSourceRoot, "gateway", "core-runtime", "gateway-bootstrap.ts"),
       path.join(coreSourceRoot, "mcp", "fusion-vision-mcp.ts"),
       path.join(coreSourceRoot, "mcp", "fusion-tool-fallback-mcp.ts"),
       path.join(coreSourceRoot, "mcp", "media-tools-proxy-mcp.ts"),
       path.join(coreSourceRoot, "mcp", "toolhub-mcp.ts"),
       path.join(coreSourceRoot, "observability", "request-log-worker.ts"),
       path.join(coreSourceRoot, "routing", "route-script-worker.ts"),
+      localAgentAuthProviderHookInput,
       upstreamHeaderSanitizerInput,
       upstreamMinOutputTokensInput
     ],
@@ -289,12 +296,14 @@ export function createCoreServerBuildOptions({ mode = "production", plugins = []
     entryNames: "[name]",
     entryPoints: [
       path.join(coreSourceRoot, "entrypoints", "server.ts"),
+      path.join(coreSourceRoot, "gateway", "core-runtime", "gateway-bootstrap.ts"),
       path.join(coreSourceRoot, "mcp", "fusion-vision-mcp.ts"),
       path.join(coreSourceRoot, "mcp", "fusion-tool-fallback-mcp.ts"),
       path.join(coreSourceRoot, "mcp", "media-tools-proxy-mcp.ts"),
       path.join(coreSourceRoot, "mcp", "toolhub-mcp.ts"),
       path.join(coreSourceRoot, "observability", "request-log-worker.ts"),
       path.join(coreSourceRoot, "routing", "route-script-worker.ts"),
+      localAgentAuthProviderHookInput,
       upstreamHeaderSanitizerInput,
       upstreamMinOutputTokensInput
     ],
@@ -371,6 +380,26 @@ export function createWebClientBridgeBuildOptions({ mode = "production", plugins
     outfile: webClientBridgeOutput,
     platform: "browser",
     plugins: [packageAliasPlugin(), ...plugins],
+    sourcemap: mode !== "production",
+    target: "chrome120"
+  };
+}
+
+export function createRequestLogBodyWorkerBuildOptions({ mode = "production", plugins = [] } = {}) {
+  return {
+    absWorkingDir: projectRoot,
+    bundle: true,
+    define: {
+      "process.env.NODE_ENV": JSON.stringify(mode)
+    },
+    entryPoints: [requestLogBodyWorkerInput],
+    format: "esm",
+    legalComments: "none",
+    logLevel: "info",
+    minify: mode === "production",
+    outfile: requestLogBodyWorkerOutput,
+    platform: "browser",
+    plugins: [rendererAliasPlugin(), packageAliasPlugin(), ...plugins],
     sourcemap: mode !== "production",
     target: "chrome120"
   };
@@ -459,6 +488,10 @@ export async function buildBrowserRenderer(options = {}) {
 
 export async function buildWebClientBridge(options = {}) {
   await esbuild.build(createWebClientBridgeBuildOptions(options));
+}
+
+export async function buildRequestLogBodyWorker(options = {}) {
+  await esbuild.build(createRequestLogBodyWorkerBuildOptions(options));
 }
 
 export function copyCliRuntimeToElectronDist() {

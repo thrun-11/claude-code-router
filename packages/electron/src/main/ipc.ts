@@ -1,19 +1,34 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell, type OpenDialogOptions, type Rectangle, type SaveDialogOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, session, shell, WebContentsView, type OpenDialogOptions, type Rectangle, type SaveDialogOptions } from "electron";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { deflateSync, inflateSync } from "node:zlib";
-import { loadPersistedAppSetting, replacePersistedAppSetting } from "@ccr/core/config/app-config-store";
+import { loadOnboardingFinished, markOnboardingFinished } from "@ccr/core/config/onboarding-state";
 import { builtInBrowserService } from "./built-in-browser";
 import { scanBotHandoffBluetoothTargets, scanBotHandoffWifiTargets } from "@ccr/core/agents/bot-gateway/handoff-scan-service";
 import { cancelBotGatewayQrLogin, startBotGatewayQrLogin, waitBotGatewayQrLogin } from "@ccr/core/agents/bot-gateway/qr-login-service";
 import { closeBotGatewayQrWindow, openBotGatewayQrWindow } from "./bot-gateway-qr-window-service";
 import { syncClaudeAppGatewayConfig } from "@ccr/core/agents/claude-app/gateway-service";
-import { findInstalledCodexAppExecutable } from "@ccr/core/agents/codex/app-launch";
+import { findInstalledCodexAppExecutable, findInstalledWorkbuddyAppExecutable } from "@ccr/core/agents/codex/app-launch";
 import { findInstalledOpenCodeAppExecutable } from "@ccr/core/agents/opencode/app-launch";
 import { loadAppConfig, saveApiKeysConfig, saveAppConfig, saveAppThemePreference, withClaudeDesignRuntimePluginConfig } from "@ccr/core/config/config";
-import { API_KEYS_DB_FILE, APP_CONFIG_DB_FILE, APP_NAME, CONFIGDIR, CONFIG_FILE, DATADIR, GATEWAY_CONFIG_FILE, IPC_CHANNELS, LEGACY_CONFIG_FILE, ONBOARDING_FINISHED_FILE, PROXY_CA_CERT_FILE, REQUEST_LOGS_DB_FILE, USAGE_DB_FILE } from "@ccr/core/config/constants";
+import {
+  APP_CONFIG_DB_FILE,
+  APP_NAME,
+  CONFIGDIR,
+  DATADIR,
+  IPC_CHANNELS,
+  LEGACY_ACTIVE_CONFIG_FILE,
+  LEGACY_APP_CONFIG_DB_FILES,
+  LEGACY_API_KEYS_DB_FILES,
+  LEGACY_CONFIG_FILE,
+  LEGACY_WINDOWS_CONFIG_FILE,
+  PROXY_CA_CERT_FILE,
+  REQUEST_LOGS_DB_FILE,
+  USAGE_DB_FILE
+} from "@ccr/core/config/constants";
 import { deepLinkService } from "./deep-link";
+import { chromeLoginImportService } from "./chrome-login-import";
 import { gatewayService } from "@ccr/core/gateway/service";
 import { shouldRestartGatewayForRuntimeConfigChange } from "@ccr/core/gateway/runtime-change";
 import { getProviderAccountSnapshots, invalidateProviderAccountSnapshotCache, resetCodexRateLimitCredit, testProviderAccountConnector } from "@ccr/core/providers/account-service";
@@ -22,8 +37,10 @@ import { fetchProviderManifest } from "@ccr/core/providers/manifest-service";
 import { getLocalAgentProviderCandidates, importLocalAgentProvider, probeLocalAgentProvider } from "@ccr/core/agents/local-providers/service";
 import { isLaunchAtLoginSupported, syncLaunchAtLogin } from "./launch-at-login";
 import { getProviderCatalogModels } from "@ccr/core/providers/model-catalog";
+import { getOpenRouterProviderCatalog } from "@ccr/core/providers/openrouter-provider-catalog";
 import { getProviderPresets } from "@ccr/core/providers/presets/index";
 import { checkGatewayProviderConnectivity, probeGatewayProvider, probeGatewayProviderCandidates } from "@ccr/core/providers/probe";
+import { syncProviderModelAutoRefreshService } from "@ccr/core/providers/model-auto-refresh";
 import { applyProfileConfig } from "@ccr/core/profiles/service";
 import { desktopCliCommandName, getProfileOpenCommand, getProfileRuntimeStatus, openProfileFromCcr, stopProfileFromCcr } from "@ccr/core/profiles/launch-service";
 import { findProfileForOpen, resolveProfileOpenSurface } from "@ccr/core/profiles/launch-core";
@@ -31,17 +48,19 @@ import { getPluginMarketplace } from "@ccr/core/plugins/marketplace";
 import { ensureProxyCertificateAuthority } from "@ccr/core/proxy/certificates";
 import { proxyService } from "@ccr/core/proxy/service";
 import { listMcpServerTools } from "@ccr/core/mcp/tool-discovery";
-import { getAgentAnalysis, getAgentTracePayload, getRequestLogDetail, getRequestLogs } from "@ccr/core/observability/request-log-store";
+import { getAgentAnalysis, getAgentTracePayload, getRequestLogBodyChunk, getRequestLogDetail, getRequestLogs } from "@ccr/core/observability/request-log-store";
 import trayController from "./tray-controller";
 import { appUpdateService } from "./update-service";
 import { getUsageStats } from "@ccr/core/usage/store";
 import { applyNativeThemePreference } from "./native-theme";
+import { registerProviderAccountWebContentFetchHandler } from "./provider-account-webcontent";
 import windowsManager from "./windows";
-import { CLAUDE_DESIGN_PLUGIN_ID, GATEWAY_PLUGIN_PERMISSION_IDS, GATEWAY_PLUGIN_SURFACE_IDS, type AgentAnalysisFilter, type AgentAnalysisTracePayloadRequest, type ApiKeyConfig, type AppCaptureElementPngRequest, type AppCaptureElementPngResult, type AppConfig, type AppDataExportResult, type AppImageExportTargetRequest, type AppImageExportTargetResult, type AppInfo, type AppRenderHtmlPngRequest, type AppRenderHtmlPngResult, type AppSaveConfigOptions, type BotGatewayQrLoginCancelRequest, type BotGatewayQrLoginStartRequest, type BotGatewayQrLoginWaitRequest, type BotGatewayQrWindowCloseRequest, type BotGatewayQrWindowOpenRequest, type GatewayPluginAppConfig, type GatewayPluginPermission, type GatewayPluginSurface, type GatewayProviderConnectivityCheckRequest, type GatewayProviderProbeCandidatesRequest, type GatewayProviderProbeRequest, type GatewayStatus, type LocalAgentProviderImportRequest, type PluginDependency, type PluginDirectorySelection, type ProfileApplyResult, type ProfileOpenRequest, type ProfileOpenResult, type ProviderAccountResetRequest, type ProviderAccountSnapshotRequestOptions, type ProviderAccountTestRequest, type ProviderCatalogModelsRequest, type ProviderIconDetectionRequest, type ProviderManifestFetchRequest, type RequestLogListFilter, type RouteScriptTestRequest, type RouteScriptValidationRequest, type UsageStatsFilter, type UsageStatsRange } from "@ccr/core/contracts/app";
-const onboardingFinishedAtSettingKey = "onboardingFinishedAt";
+import { CLAUDE_DESIGN_PLUGIN_ID, GATEWAY_PLUGIN_PERMISSION_IDS, GATEWAY_PLUGIN_SURFACE_IDS, type AgentAnalysisFilter, type AgentAnalysisTracePayloadRequest, type ApiKeyConfig, type AppCaptureElementPngRequest, type AppCaptureElementPngResult, type AppConfig, type AppDataExportResult, type AppImageExportTargetRequest, type AppImageExportTargetResult, type AppInfo, type AppRenderHtmlPngRequest, type AppRenderHtmlPngResult, type AppSaveConfigOptions, type BotGatewayQrLoginCancelRequest, type BotGatewayQrLoginStartRequest, type BotGatewayQrLoginWaitRequest, type BotGatewayQrWindowCloseRequest, type BotGatewayQrWindowOpenRequest, type ChromeLoginImportRequest, type GatewayPluginAppConfig, type GatewayPluginPermission, type GatewayPluginSurface, type GatewayProviderConnectivityCheckRequest, type GatewayProviderProbeCandidatesRequest, type GatewayProviderProbeRequest, type GatewayStatus, type LocalAgentProviderImportRequest, type OpenRouterProviderCatalogRequest, type PluginDependency, type PluginDirectorySelection, type ProfileApplyResult, type ProfileOpenRequest, type ProfileOpenResult, type ProviderAccountResetRequest, type ProviderAccountSnapshotRequestOptions, type ProviderAccountTestRequest, type ProviderCatalogModelsRequest, type ProviderIconDetectionRequest, type ProviderManifestFetchRequest, type RequestLogListFilter, type RouteScriptTestRequest, type RouteScriptValidationRequest, type UsageStatsFilter, type UsageStatsRange } from "@ccr/core/contracts/app";
 const imageExportTargets = new Map<string, string>();
 const gatewayPluginPermissionIdSet = new Set<string>(GATEWAY_PLUGIN_PERMISSION_IDS);
 const gatewayPluginSurfaceIdSet = new Set<string>(GATEWAY_PLUGIN_SURFACE_IDS);
+
+registerProviderAccountWebContentFetchHandler({ BrowserWindow, WebContentsView, session });
 
 function applyAppThemePreference(theme: AppConfig["theme"]): void {
   applyNativeThemePreference(theme);
@@ -51,22 +70,21 @@ function applyAppThemePreference(theme: AppConfig["theme"]): void {
 ipcMain.handle(IPC_CHANNELS.appGetInfo, () => {
   const chatgptAppPath = findInstalledCodexAppExecutable().executable;
   const opencodeAppPath = findInstalledOpenCodeAppExecutable().executable;
+  const workbuddyAppPath = findInstalledWorkbuddyAppExecutable().executable;
   return {
-    appConfigDbFile: APP_CONFIG_DB_FILE,
-    apiKeysDbFile: API_KEYS_DB_FILE,
     ...(chatgptAppPath ? { chatgptAppPath } : {}),
+    configDbFile: APP_CONFIG_DB_FILE,
     configDir: CONFIGDIR,
-    configFile: CONFIG_FILE,
     dataDir: DATADIR,
     desktop: true,
-    gatewayConfigFile: GATEWAY_CONFIG_FILE,
     launchAtLoginSupported: isLaunchAtLoginSupported(),
     name: APP_NAME,
     ...(opencodeAppPath ? { opencodeAppPath } : {}),
     platform: process.platform,
     requestLogsDbFile: REQUEST_LOGS_DB_FILE,
     usageDbFile: USAGE_DB_FILE,
-    version: app.getVersion()
+    version: app.getVersion(),
+    ...(workbuddyAppPath ? { workbuddyAppPath } : {})
   } satisfies AppInfo;
 });
 
@@ -84,10 +102,7 @@ ipcMain.handle(IPC_CHANNELS.appRenderHtmlPng, async (event, request: AppRenderHt
 });
 
 ipcMain.handle(IPC_CHANNELS.appGetConfig, () => loadAppConfig());
-ipcMain.handle(IPC_CHANNELS.appGetOnboardingFinished, async () => {
-  const persisted = await loadPersistedAppSetting(onboardingFinishedAtSettingKey);
-  return Boolean(readString(persisted) || existsSync(ONBOARDING_FINISHED_FILE));
-});
+ipcMain.handle(IPC_CHANNELS.appGetOnboardingFinished, () => loadOnboardingFinished());
 ipcMain.handle(IPC_CHANNELS.appGetPendingProviderDeepLinks, () => deepLinkService.consumePendingProviderRequests());
 ipcMain.handle(IPC_CHANNELS.appGetLocalAgentProviderCandidates, () => getLocalAgentProviderCandidates());
 ipcMain.handle(IPC_CHANNELS.appGetProfileOpenCommand, async (_event, request: ProfileOpenRequest) => {
@@ -101,6 +116,7 @@ ipcMain.handle(IPC_CHANNELS.appGetProfileRuntimeStatus, () => {
 });
 ipcMain.handle(IPC_CHANNELS.appGetProviderAccountSnapshots, (_event, provider?: string, options?: ProviderAccountSnapshotRequestOptions) => getProviderAccountSnapshots(provider, options));
 ipcMain.handle(IPC_CHANNELS.appGetProviderCatalogModels, (_event, request: ProviderCatalogModelsRequest) => getProviderCatalogModels(request));
+ipcMain.handle(IPC_CHANNELS.appGetOpenRouterProviderCatalog, (_event, request: OpenRouterProviderCatalogRequest) => getOpenRouterProviderCatalog(request));
 ipcMain.handle(IPC_CHANNELS.appGetProviderPresets, () => getProviderPresets());
 ipcMain.handle(IPC_CHANNELS.appGetAgentAnalysis, (_event, filter?: AgentAnalysisFilter) => getAgentAnalysis(filter));
 ipcMain.handle(IPC_CHANNELS.appGetAgentTracePayload, (_event, request: AgentAnalysisTracePayloadRequest) => getAgentTracePayload(request));
@@ -110,6 +126,7 @@ ipcMain.handle(IPC_CHANNELS.appGetProxyNetworkCaptures, () => proxyService.getNe
 ipcMain.handle(IPC_CHANNELS.appGetProxyStatus, () => proxyService.getStatus());
 ipcMain.handle(IPC_CHANNELS.appGetPluginMarketplace, () => getPluginMarketplace());
 ipcMain.handle(IPC_CHANNELS.appGetRequestLogDetail, (_event, request) => getRequestLogDetail(request));
+ipcMain.handle(IPC_CHANNELS.appGetRequestLogBodyChunk, (_event, request) => getRequestLogBodyChunk(request));
 ipcMain.handle(IPC_CHANNELS.appGetRequestLogs, (_event, filter?: RequestLogListFilter) => getRequestLogs(filter));
 ipcMain.handle(IPC_CHANNELS.appGetUpdateStatus, () => appUpdateService.getStatus());
 ipcMain.handle(IPC_CHANNELS.appGetUsageStats, (_event, range?: UsageStatsRange, filter?: UsageStatsFilter) => getUsageStats(range, filter));
@@ -129,9 +146,15 @@ ipcMain.handle(IPC_CHANNELS.appListMcpServerTools, async (_event, serverName: st
   }
   return listMcpServerTools(server);
 });
-ipcMain.handle(IPC_CHANNELS.appOpenBuiltInBrowser, async () => {
+ipcMain.handle(IPC_CHANNELS.appStartChromeLoginImport, async (_event, request: ChromeLoginImportRequest) => {
+  return await chromeLoginImportService.createJob(request);
+});
+ipcMain.handle(IPC_CHANNELS.appGetChromeLoginImport, (_event, id: string) => {
+  return chromeLoginImportService.getJob(typeof id === "string" ? id : "");
+});
+ipcMain.handle(IPC_CHANNELS.appOpenBuiltInBrowser, async (_event, url?: string) => {
   const config = await loadAppConfig();
-  await builtInBrowserService.open(config);
+  await builtInBrowserService.open(config, url);
 });
 ipcMain.handle(IPC_CHANNELS.appOpenPluginApp, async (_event, pluginId: string, appId?: string) => {
   const normalizedPluginId = readString(pluginId);
@@ -177,12 +200,12 @@ ipcMain.handle(IPC_CHANNELS.appOpenProfile, async (_event, request: ProfileOpenR
   const config = profile.agent === CLAUDE_DESIGN_PLUGIN_ID
     ? withClaudeDesignRuntimePluginConfig(syncedClaudeAppConfig.config)
     : syncedClaudeAppConfig.config;
-  const status = await gatewayService.start(config);
-  if (status.state !== "running") {
-    throw new Error(status.lastError || "CCR gateway did not start.");
-  }
-  logProfileApplyResult(await applyProfileConfig(config));
   if (profile.agent === CLAUDE_DESIGN_PLUGIN_ID) {
+    const status = await gatewayService.ensureStarted(config);
+    if (status.state !== "running") {
+      throw new Error(status.lastError || "CCR gateway did not start.");
+    }
+    logProfileApplyResult(await applyProfileConfig(config));
     await deepLinkService.openPluginApp(CLAUDE_DESIGN_PLUGIN_ID);
     return {
       message: `Opened Claude Design with ${profile.name || profile.id}.`,
@@ -200,8 +223,18 @@ ipcMain.handle(IPC_CHANNELS.appApplyClaudeAppGateway, async (_event, config?: Ap
   const synced = await syncClaudeAppGatewayConfig(baseConfig);
   const savedConfig = synced.config;
   let runtimeStatus = gatewayService.getStatus();
+  const restartRequired = synced.configChanged ||
+    shouldRestartGatewayForRuntimeConfigChange(previousConfig, savedConfig) ||
+    runtimeStatus.state !== "running";
 
-  if (synced.configChanged || shouldRestartGatewayForRuntimeConfigChange(previousConfig, savedConfig) || runtimeStatus.state !== "running") {
+  if (runtimeStatus.gatewayManagedExternally) {
+    if (restartRequired) {
+      runtimeStatus = await gatewayService.restart(savedConfig);
+    } else {
+      await gatewayService.updateConfig(savedConfig);
+      runtimeStatus = gatewayService.getStatus();
+    }
+  } else if (restartRequired) {
     runtimeStatus = await gatewayService.start(savedConfig);
   } else {
     await gatewayService.updateConfig(savedConfig);
@@ -303,7 +336,16 @@ ipcMain.handle(IPC_CHANNELS.appSaveConfig, async (_event, config: AppConfig, opt
   const syncedClaudeAppConfig = await syncClaudeAppGatewayConfig(savedConfig);
   savedConfig = syncedClaudeAppConfig.config;
   let runtimeStatus = gatewayService.getStatus();
-  if (syncedClaudeAppConfig.configChanged || shouldRestartGatewayForRuntimeConfigChange(previousConfig, savedConfig)) {
+  const restartRequired = syncedClaudeAppConfig.configChanged ||
+    shouldRestartGatewayForRuntimeConfigChange(previousConfig, savedConfig);
+  if (runtimeStatus.gatewayManagedExternally) {
+    if (restartRequired) {
+      runtimeStatus = await gatewayService.restart(savedConfig);
+    } else {
+      await gatewayService.updateConfig(savedConfig);
+      runtimeStatus = gatewayService.getStatus();
+    }
+  } else if (restartRequired) {
     runtimeStatus = await gatewayService.start(savedConfig);
   } else {
     await gatewayService.updateConfig(savedConfig);
@@ -314,6 +356,7 @@ ipcMain.handle(IPC_CHANNELS.appSaveConfig, async (_event, config: AppConfig, opt
   await builtInBrowserService.syncProxy(savedConfig);
   await trayController.refreshIconFromConfig(savedConfig);
   invalidateProviderAccountSnapshotCache();
+  syncProviderModelAutoRefresh(savedConfig);
   return savedConfig;
 });
 ipcMain.handle(IPC_CHANNELS.appSetThemePreference, async (_event, theme: unknown) => {
@@ -331,14 +374,15 @@ ipcMain.handle(IPC_CHANNELS.appSaveApiKeys, async (_event, apiKeys: ApiKeyConfig
   return nextConfig;
 });
 ipcMain.handle(IPC_CHANNELS.appSetOnboardingFinished, async () => {
-  await replacePersistedAppSetting(onboardingFinishedAtSettingKey, new Date().toISOString());
+  await markOnboardingFinished();
+  windowsManager.setOnboardingFinished(true);
   windowsManager.resizeMainWindowToScreenSize();
   return true;
 });
 ipcMain.handle(IPC_CHANNELS.appRestartGateway, async () => {
   const syncedClaudeAppConfig = await syncClaudeAppGatewayConfig(await loadAppConfig());
   const config = syncedClaudeAppConfig.config;
-  const status = await gatewayService.start(config);
+  const status = await gatewayService.restart(config);
   await applyProfileIfServiceRunning(config, status);
   await builtInBrowserService.syncProxy(config);
   return status;
@@ -346,7 +390,7 @@ ipcMain.handle(IPC_CHANNELS.appRestartGateway, async () => {
 ipcMain.handle(IPC_CHANNELS.appStartGateway, async () => {
   const syncedClaudeAppConfig = await syncClaudeAppGatewayConfig(await loadAppConfig());
   const config = syncedClaudeAppConfig.config;
-  const status = await gatewayService.start(config);
+  const status = await gatewayService.ensureStarted(config);
   await applyProfileIfServiceRunning(config, status);
   await builtInBrowserService.syncProxy(config);
   return status;
@@ -369,7 +413,7 @@ ipcMain.handle(IPC_CHANNELS.appShowMainWindow, () => {
 ipcMain.handle(IPC_CHANNELS.appRestartProxy, async () => {
   const syncedClaudeAppConfig = await syncClaudeAppGatewayConfig(await loadAppConfig());
   const config = syncedClaudeAppConfig.config;
-  const status = await gatewayService.start(config);
+  const status = await gatewayService.restart(config);
   await applyProfileIfServiceRunning(config, status);
   await builtInBrowserService.syncProxy(config);
   return proxyService.getStatus();
@@ -380,6 +424,18 @@ async function applyProfileIfServiceRunning(config: AppConfig, status: GatewaySt
     return;
   }
   logProfileApplyResult(await applyProfileConfig(config));
+}
+
+function syncProviderModelAutoRefresh(config: AppConfig): void {
+  syncProviderModelAutoRefreshService(config, {
+    logger: console,
+    onConfigChanged: async (nextConfig) => {
+      await gatewayService.updateConfig(nextConfig);
+      await applyProfileIfServiceRunning(nextConfig, gatewayService.getStatus());
+      invalidateProviderAccountSnapshotCache();
+      trayController.refreshUsageTitle();
+    }
+  });
 }
 
 function logProfileApplyResult(result: ProfileApplyResult): void {
@@ -402,10 +458,7 @@ async function exportAppData(window: BrowserWindow | null): Promise<AppDataExpor
 
   assertExportTargetIsNotInternalDataFile(result.filePath);
   const config = await loadAppConfig();
-  const onboardingFinished = Boolean(
-    readString(await loadPersistedAppSetting(onboardingFinishedAtSettingKey)) ||
-    existsSync(ONBOARDING_FINISHED_FILE)
-  );
+  const onboardingFinished = await loadOnboardingFinished();
   const payload = {
     app: {
       name: APP_NAME,
@@ -933,7 +986,8 @@ function readDataExportFiles(): Array<{ base64: string; name: string; path: stri
 function dataExportCandidateFiles(): string[] {
   return uniqueStrings([
     ...sqliteDataFiles(APP_CONFIG_DB_FILE),
-    ...sqliteDataFiles(API_KEYS_DB_FILE),
+    ...LEGACY_APP_CONFIG_DB_FILES.flatMap(sqliteDataFiles),
+    ...LEGACY_API_KEYS_DB_FILES.flatMap(sqliteDataFiles),
     ...sqliteDataFiles(REQUEST_LOGS_DB_FILE),
     ...sqliteDataFiles(USAGE_DB_FILE)
   ]);
@@ -946,12 +1000,9 @@ function sqliteDataFiles(file: string): string[] {
 function assertExportTargetIsNotInternalDataFile(file: string): void {
   const target = path.resolve(file);
   const reserved = new Set([
-    CONFIG_FILE,
+    LEGACY_ACTIVE_CONFIG_FILE,
+    LEGACY_WINDOWS_CONFIG_FILE,
     LEGACY_CONFIG_FILE,
-    APP_CONFIG_DB_FILE,
-    API_KEYS_DB_FILE,
-    REQUEST_LOGS_DB_FILE,
-    USAGE_DB_FILE,
     ...dataExportCandidateFiles()
   ].map((item) => path.resolve(item)));
   if (reserved.has(target)) {
@@ -1296,6 +1347,11 @@ function pluginPermissionAlias(value: string): string {
     case "route":
     case "routes":
       return "gateway-routes";
+    case "gateway-request-transform":
+    case "gateway-request-transforms":
+    case "request-transform":
+    case "request-transforms":
+      return "gateway-request-transforms";
     case "proxy":
     case "proxy-route":
       return "proxy-routes";

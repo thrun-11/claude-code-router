@@ -6,17 +6,20 @@ import { assertAvailableGatewayModels, type AppConfig, type ProfileConfig, type 
 import { botGatewayProfileEnv } from "@ccr/core/agents/bot-gateway/env";
 import { applyClaudeAppGatewayConfig, readClaudeAppGatewayApiKeyCandidates } from "@ccr/core/agents/claude-app/gateway-service";
 import { launchClaudeAppProfile, resolveClaudeAppProfileUserDataDir } from "@ccr/core/agents/claude-app/launch";
+import { resolveClaudeCodeGatewayAuthMode } from "@ccr/core/agents/claude-code/auth-mode";
 import { claudeCodeUtcTimezoneEnvOverride } from "@ccr/core/agents/claude-code/environment";
-import { codexDesktopAppName, launchCodexAppProfile, launchZcodeAppProfile, refreshCodexCompatibleAppProfileFiles } from "@ccr/core/agents/codex/app-launch";
+import { codexDesktopAppName, launchCodexAppProfile, launchWorkbuddyAppProfile, launchZcodeAppProfile, refreshCodexCompatibleAppProfileFiles, workbuddyDesktopAppName } from "@ccr/core/agents/codex/app-launch";
 import { CodexAppMediaPreviewBridge, shouldEnableCodexMediaPreviewBridge } from "@ccr/core/agents/codex/media-preview-bridge";
 import { findRunningOpenCodeAppPid, launchOpenCodeAppProfile, openCodeAppLaunchSignature } from "@ccr/core/agents/opencode/app-launch";
 import { writeOpenCodeGatewayConfig } from "@ccr/core/agents/opencode/profile-config";
 import { codexCliMiddlewareRuntimeScript } from "@ccr/core/agents/codex/cli-middleware-runtime";
 import { CONFIGDIR } from "@ccr/core/config/constants";
+import { endpoint } from "@ccr/core/gateway/core-runtime/supervisor";
 import { gatewayService } from "@ccr/core/gateway/service";
 import { TOOL_HUB_MCP_RUNTIME_FILE_NAME, bundledToolHubMcpEntryPathCandidates } from "@ccr/core/mcp/toolhub-config";
 import { mediaToolsGatewayEndpoint } from "@ccr/core/mcp/grok-media-config";
 import { buildProfileLaunchPlan, findProfileForOpen, profileLaunchSpawnCommand, profileOpenCommand, profileOpenSurfaces, resolveClaudeCodeSettingsFile, resolveProfileOpenSurface } from "@ccr/core/profiles/launch-core";
+import { profileApiKeyId } from "@ccr/core/profiles/api-key";
 import { applyProfileConfig, cleanupGeneratedBinBackups } from "@ccr/core/profiles/service";
 import { isDesktopAppRuntime } from "@ccr/core/runtime/desktop-app";
 import { windowsEnvironmentChangedPowerShellLines, windowsSystemCommand } from "@ccr/core/platform/windows-system";
@@ -30,6 +33,7 @@ export const CCR_CLI_COMPANION_RUNTIME_FILE_NAMES = [
   "browser-web-search-proxy-mcp.js",
   "fusion-tool-fallback-mcp.js",
   "fusion-vision-mcp.js",
+  "gateway-bootstrap.js",
   "media-tools-proxy-mcp.js",
   "next-ai-gateway.js",
   "request-log-worker.js",
@@ -125,7 +129,7 @@ export async function openProfileFromCcr(config: AppConfig, request: ProfileOpen
   if (profile.agent === "claude-code" && surface === "app") {
     return openClaudeAppProfile(config, profile);
   }
-  if ((profile.agent === "codex" || profile.agent === "zcode") && surface === "app") {
+  if ((profile.agent === "codex" || profile.agent === "workbuddy" || profile.agent === "zcode") && surface === "app") {
     return await openCodexAppProfile(config, profile);
   }
   if (profile.agent === "opencode" && surface === "app") {
@@ -258,7 +262,11 @@ async function openOpenCodeAppProfile(config: AppConfig, profile: ReturnType<typ
 }
 
 async function openCodexAppProfile(config: AppConfig, profile: ReturnType<typeof findProfileForOpen>): Promise<ProfileOpenResult> {
-  const appName = profile.agent === "zcode" ? "ZCode App" : codexDesktopAppName;
+  const appName = profile.agent === "zcode"
+    ? "ZCode App"
+    : profile.agent === "workbuddy"
+      ? workbuddyDesktopAppName
+      : codexDesktopAppName;
   const profileGatewayConfig = await ensureProfileGateway(config, profile, appName);
   const existing = runningProfileApp(profile.id, "app");
   if (existing) {
@@ -295,7 +303,9 @@ async function openCodexAppProfile(config: AppConfig, profile: ReturnType<typeof
   }
   const launch = profile.agent === "zcode"
     ? launchZcodeAppProfile(CONFIGDIR, profile, profileGatewayConfig)
-    : launchCodexAppProfile(CONFIGDIR, profile, profileGatewayConfig);
+    : profile.agent === "workbuddy"
+      ? launchWorkbuddyAppProfile(CONFIGDIR, profile, profileGatewayConfig)
+      : launchCodexAppProfile(CONFIGDIR, profile, profileGatewayConfig);
   const entry = registerProfileApp(profile, "app", launch);
   const started = await waitForProfileAppStart(entry, 12000);
   if (!started) {
@@ -333,10 +343,13 @@ async function openClaudeAppProfile(config: AppConfig, profile: ReturnType<typeo
     };
   }
 
-  applyClaudeAppGatewayConfig(profileGatewayConfig);
+  applyClaudeAppGatewayConfig(profileGatewayConfig, {
+    defaultModel: profile.model
+  });
   applyClaudeAppGatewayConfig(profileGatewayConfig, {
     backup: false,
     dataDir: resolveClaudeAppProfileUserDataDir(CONFIGDIR, profile),
+    defaultModel: profile.model,
     refreshModelDiscoveryCache: true
   });
   await ensureGatewayConfigRunning(profileGatewayConfig, profile, "Claude App");
@@ -425,6 +438,7 @@ async function ensureGatewayConfigRunning(
 
 type ExistingProfileGatewayProbe =
   | { endpoint: string; reason?: string; state: "unavailable" }
+  | { endpoint: string; message: string; state: "incompatible" }
   | { endpoint: string; status?: number; state: "not-ccr" }
   | { endpoint: string; message?: string; status: number; state: "unauthorized" }
   | { endpoint: string; status: number; state: "unusable" }
@@ -468,6 +482,16 @@ async function probeExistingProfileGateway(
     }
     const models = await fetchExistingGateway(endpoint, "/v1/models", { headers });
     if (models.status === 200) {
+      if (requiresClaudeCodeWifGateway(profile)) {
+        const rootProbe = root ?? await fetchExistingGateway(endpoint, "/");
+        if (!rootSupportsClaudeCodeWif(rootProbe.payload)) {
+          return {
+            endpoint,
+            message: "The running CCR gateway does not advertise the Claude Code WIF token endpoint. Restart CCR Desktop or run ccr start to use WIF authentication.",
+            state: "incompatible"
+          };
+        }
+      }
       return { apiKey, endpoint, state: "usable" };
     }
     if (models.status === 401 || models.status === 403) {
@@ -541,6 +565,19 @@ function isCcrGatewayHealth(value: unknown): boolean {
   return typeof value.core === "string" && typeof value.status === "string" && typeof value.timestamp === "string";
 }
 
+function rootSupportsClaudeCodeWif(value: unknown): boolean {
+  if (!isRecord(value) || !Array.isArray(value.endpoints)) {
+    return false;
+  }
+  return value.endpoints.some((endpoint) =>
+    typeof endpoint === "string" && endpoint.toLowerCase().includes("/v1/oauth/token")
+  );
+}
+
+function requiresClaudeCodeWifGateway(profile: ReturnType<typeof findProfileForOpen>): boolean {
+  return profile.agent === "claude-code" && resolveClaudeCodeGatewayAuthMode(profile) === "wif";
+}
+
 function readGatewayErrorMessage(value: unknown): string | undefined {
   if (!isRecord(value) || !isRecord(value.error)) {
     return undefined;
@@ -559,7 +596,7 @@ function existingGatewayApiKeyCandidates(
     candidateConfig.APIKEY,
     ...(Array.isArray(candidateConfig.APIKEYS) ? candidateConfig.APIKEYS.map((apiKey) => apiKey.key) : []),
     ...readClaudeAppGatewayApiKeyCandidates(),
-    ...readClaudeCodeApiKeyHelperCandidates(profile)
+    ...readClaudeCodeProfileTokenCandidates(profile)
   ];
   const seen = new Set<string>();
   const result: string[] = [];
@@ -574,16 +611,39 @@ function existingGatewayApiKeyCandidates(
   return result.length > 0 ? result : [undefined];
 }
 
-function readClaudeCodeApiKeyHelperCandidates(profile: ReturnType<typeof findProfileForOpen>): string[] {
-  const file = path.join(CONFIGDIR, "bin", claudeCodeApiKeyHelperFilename(profile));
+function readClaudeCodeProfileTokenCandidates(profile: ReturnType<typeof findProfileForOpen>): string[] {
+  return uniqueStrings([
+    ...readClaudeCodeWifTokenCandidates(profile),
+    ...readClaudeCodeLegacyApiKeyHelperCandidates(profile)
+  ]);
+}
+
+function readClaudeCodeWifTokenCandidates(profile: ReturnType<typeof findProfileForOpen>): string[] {
+  const file = path.join(CONFIGDIR, "bin", claudeCodeWifIdentityTokenFilename(profile));
   const files = [
     file,
     ...readBackupFiles(file)
   ];
-  return uniqueStrings(files.map(readClaudeCodeApiKeyHelperToken));
+  return uniqueStrings(files.map(readFirstLineToken));
 }
 
-function claudeCodeApiKeyHelperFilename(profile: ReturnType<typeof findProfileForOpen>): string {
+function claudeCodeWifIdentityTokenFilename(profile: ReturnType<typeof findProfileForOpen>): string {
+  const slug = sanitizeProfilePathSegment(profile.id || profile.name || profile.agent) || "claude-code";
+  return process.platform === "win32"
+    ? `ccr-claude-code-wif-token-${slug}.txt`
+    : `ccr-claude-code-wif-token-${slug}`;
+}
+
+function readClaudeCodeLegacyApiKeyHelperCandidates(profile: ReturnType<typeof findProfileForOpen>): string[] {
+  const file = path.join(CONFIGDIR, "bin", claudeCodeLegacyApiKeyHelperFilename(profile));
+  const files = [
+    file,
+    ...readBackupFiles(file)
+  ];
+  return uniqueStrings(files.map(readClaudeCodeLegacyApiKeyHelperToken));
+}
+
+function claudeCodeLegacyApiKeyHelperFilename(profile: ReturnType<typeof findProfileForOpen>): string {
   const slug = sanitizeProfilePathSegment(profile.id || profile.name || profile.agent) || "claude-code";
   return process.platform === "win32"
     ? `ccr-claude-code-api-key-${slug}.cmd`
@@ -604,7 +664,21 @@ function readBackupFiles(file: string): string[] {
   }
 }
 
-function readClaudeCodeApiKeyHelperToken(file: string): string {
+function readFirstLineToken(file: string): string {
+  if (!existsSync(file)) {
+    return "";
+  }
+  try {
+    return readFileSync(file, "utf8")
+      .split(/\r?\n/g)
+      .map((line) => line.trim())
+      .find(Boolean) || "";
+  } catch {
+    return "";
+  }
+}
+
+function readClaudeCodeLegacyApiKeyHelperToken(file: string): string {
   if (!existsSync(file)) {
     return "";
   }
@@ -649,6 +723,9 @@ function existingGatewayConflictMessage(probe: ExistingProfileGatewayProbe, appN
   if (probe.state === "unusable") {
     return `CCR gateway is already running at ${probe.endpoint}, but it cannot serve ${appName} right now (HTTP ${probe.status}). Restart CCR Desktop or run ccr start to refresh the gateway before opening this profile.`;
   }
+  if (probe.state === "incompatible") {
+    return `CCR gateway is already running at ${probe.endpoint}, but it is not compatible with ${appName}. ${probe.message}`;
+  }
   if (probe.state === "not-ccr") {
     return `Port ${probe.endpoint} is already in use by a non-CCR service. Stop that process or change the CCR gateway port.`;
   }
@@ -664,7 +741,7 @@ function isAddressInUseError(message: string | undefined): boolean {
 
 function profileGatewayEndpoint(config: AppConfig): string {
   const host = probeGatewayHost(config.gateway.host);
-  return `http://${formatEndpointHost(host)}:${config.gateway.port}/`;
+  return endpoint(host, config.gateway.port);
 }
 
 function probeGatewayHost(host: string): string {
@@ -675,10 +752,6 @@ function probeGatewayHost(host: string): string {
     return "::1";
   }
   return host;
-}
-
-function formatEndpointHost(host: string): string {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
 function profileGatewayConfigFor(config: AppConfig, profile: ReturnType<typeof findProfileForOpen>): AppConfig {
@@ -986,11 +1059,34 @@ function isProcessAlive(pid: number | undefined): boolean {
   }
 }
 
-function isProfileAppRunning(entry: Pick<RunningProfileApp, "pid" | "pidIsLauncher" | "userDataDir">): boolean {
-  if (profileAppMainPid(entry)) {
+type ProfileAppRunningEntry = Pick<RunningProfileApp, "pid" | "pidIsLauncher" | "userDataDir">;
+
+type ProfileAppProcessProbe = {
+  isProcessAlive: (pid: number | undefined) => boolean;
+  profileAppMainPid: (entry: ProfileAppRunningEntry) => number | undefined;
+};
+
+const defaultProfileAppProcessProbe: ProfileAppProcessProbe = {
+  isProcessAlive,
+  profileAppMainPid
+};
+
+function profileAppRunningWithProbe(entry: ProfileAppRunningEntry, probe: ProfileAppProcessProbe): boolean {
+  if (!entry.pidIsLauncher && probe.isProcessAlive(entry.pid)) {
     return true;
   }
-  return !entry.pidIsLauncher && isProcessAlive(entry.pid);
+  return Boolean(probe.profileAppMainPid(entry));
+}
+
+function isProfileAppRunning(entry: ProfileAppRunningEntry): boolean {
+  return profileAppRunningWithProbe(entry, defaultProfileAppProcessProbe);
+}
+
+export function isProfileAppRunningWithProbeForTest(
+  entry: ProfileAppRunningEntry,
+  probe: ProfileAppProcessProbe
+): boolean {
+  return profileAppRunningWithProbe(entry, probe);
 }
 
 function profileAppMainPid(entry: Pick<RunningProfileApp, "userDataDir">): number | undefined {
@@ -1116,30 +1212,13 @@ function sendProfileProcessSignal(pid: number | undefined, signal: NodeJS.Signal
   }
 }
 
-async function waitForProcessExit(pid: number | undefined, timeoutMs: number): Promise<boolean> {
-  if (!pid) {
-    return true;
-  }
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    if (!isProcessAlive(pid)) {
-      return true;
-    }
-    await sleep(100);
-  }
-  return !isProcessAlive(pid);
-}
-
 async function waitForProfileAppStart(entry: Pick<RunningProfileApp, "pid" | "pidIsLauncher" | "spawnError" | "userDataDir">, timeoutMs: number): Promise<boolean> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     if (entry.spawnError) {
       return false;
     }
-    if (profileAppMainPid(entry)) {
-      return true;
-    }
-    if (!entry.pidIsLauncher && isProcessAlive(entry.pid)) {
+    if (isProfileAppRunning(entry)) {
       return true;
     }
     if (process.platform !== "win32" && !entry.pidIsLauncher && !isProcessAlive(entry.pid)) {
@@ -1147,7 +1226,7 @@ async function waitForProfileAppStart(entry: Pick<RunningProfileApp, "pid" | "pi
     }
     await sleep(100);
   }
-  return !entry.spawnError && (Boolean(profileAppMainPid(entry)) || (!entry.pidIsLauncher && isProcessAlive(entry.pid)));
+  return !entry.spawnError && isProfileAppRunning(entry);
 }
 
 async function waitForStableProfileAppStart(
@@ -1161,7 +1240,7 @@ async function waitForStableProfileAppStart(
     if (entry.spawnError) {
       return false;
     }
-    const running = Boolean(profileAppMainPid(entry)) || (!entry.pidIsLauncher && isProcessAlive(entry.pid));
+    const running = isProfileAppRunning(entry);
     if (running) {
       runningSince ??= Date.now();
       if (Date.now() - runningSince >= stableMs) {
@@ -2054,10 +2133,6 @@ function findProfileApiKey(config: AppConfig, profile: ReturnType<typeof findPro
   const keyId = profileApiKeyId(profile);
   const key = config.APIKEYS.find((apiKey) => apiKey.id === keyId)?.key.trim();
   return key || config.APIKEYS.find((apiKey) => apiKey.key.trim())?.key.trim() || config.APIKEY.trim();
-}
-
-function profileApiKeyId(profile: ReturnType<typeof findProfileForOpen>): string {
-  return `profile:${sanitizeProfilePathSegment(profile.id || profile.name || profile.agent) || "profile"}`;
 }
 
 function sanitizeProfilePathSegment(value: string): string {

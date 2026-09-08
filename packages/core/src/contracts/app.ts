@@ -1,12 +1,9 @@
 export type AppInfo = {
-  appConfigDbFile: string;
-  apiKeysDbFile: string;
   chatgptAppPath?: string;
+  configDbFile: string;
   configDir: string;
-  configFile: string;
   dataDir: string;
   desktop: boolean;
-  gatewayConfigFile: string;
   launchAtLoginSupported: boolean;
   requestLogsDbFile: string;
   name: string;
@@ -14,6 +11,7 @@ export type AppInfo = {
   platform: string;
   usageDbFile: string;
   version: string;
+  workbuddyAppPath?: string;
 };
 
 export type AppDataExportResult = {
@@ -177,6 +175,8 @@ export type GatewayProviderConfig = {
   icon?: string;
   id?: string;
   enabled?: boolean;
+  autoFetchModels?: boolean;
+  autoFetchKnownModels?: string[];
   modelDescriptions?: Record<string, string>;
   modelDisplayNames?: Record<string, string>;
   modelMetadata?: Record<string, ProviderModelMetadata>;
@@ -212,19 +212,48 @@ export type ProviderModelPricing = {
   outputUsdPerMillionTokens?: number;
 };
 
+export type ProviderModelOpenRouterDiscountRoutingConfig = {
+  allowFallbacks?: boolean;
+  cacheHitRate?: number;
+  enabled?: boolean;
+  endpointTtlMs?: number;
+  minOutputTokens?: number;
+  minSavingsRatio?: number;
+  minSavingsUsd?: number;
+  minUptime5m?: number;
+  outputTokenRatio?: number;
+  providerBlacklist?: string[];
+  requireParameters?: boolean;
+  respectExistingProviderOrder?: boolean;
+};
+
 export type ProviderModelMetadata = {
   additionalSpeedTiers?: unknown[];
   capabilities?: ProviderModelCapabilities;
+  contextWindowPinned?: boolean;
   contextWindow?: number;
   defaultReasoningLevel?: string | null;
   defaultReasoningSummary?: string;
   effectiveContextWindowPercent?: number;
   maxContextWindow?: number;
+  maxOutputTokens?: number;
+  openRouterDiscountRouting?: ProviderModelOpenRouterDiscountRoutingConfig;
   pricing?: ProviderModelPricing;
   serviceTiers?: unknown[];
+  supportsFastMode?: boolean;
   supportedReasoningLevels?: ProviderReasoningLevel[];
   supportsReasoningSummaries?: boolean;
 };
+
+export function effectiveContextWindowPercentFor(metadata: ProviderModelMetadata | undefined): number | undefined {
+  if (metadata?.contextWindowPinned) {
+    return 100;
+  }
+  const percent = metadata?.effectiveContextWindowPercent;
+  return percent !== undefined && Number.isFinite(percent) && percent > 0 && percent <= 100
+    ? percent
+    : undefined;
+}
 
 export type ProviderCredentialConfig = {
   account?: ProviderAccountConfig;
@@ -241,12 +270,13 @@ export type ProviderCredentialConfig = {
 };
 
 export type ProviderAccountAuthMode = "provider-api-key" | "provider-api-key-raw" | "none";
-export type ProviderAccountConnectorSource = "standard" | "http-json" | "plugin" | "local-estimate" | "merged" | "unsupported";
+export type ProviderAccountConnectorSource = "standard" | "http-json" | "webcontent-json" | "plugin" | "local-estimate" | "merged" | "unsupported";
 export type ProviderAccountStatus = "ok" | "warning" | "critical" | "error" | "unsupported";
 export type ProviderAccountMeterKind = "balance" | "subscription" | "quota" | "time_window" | "tokens" | "requests";
 export type ProviderAccountMeterUnit = "USD" | "CNY" | "hours" | "minutes" | "tokens" | "requests" | string;
 export type ProviderAccountMeterWindow = "5h" | "daily" | "weekly" | "monthly" | string;
 export type ProviderAccountHttpJsonParser = "grok-subscription" | "kimi-code-usages" | "new-api-key-usage" | "new-api-user-self";
+export type ProviderAccountBrowserCredentialsMode = "include" | "omit" | "same-origin";
 
 export type ProviderAccountConfig = {
   connectors?: ProviderAccountConnectorConfig[];
@@ -257,6 +287,7 @@ export type ProviderAccountConfig = {
 export type ProviderAccountConnectorConfig =
   | ProviderAccountStandardConnectorConfig
   | ProviderAccountHttpJsonConnectorConfig
+  | ProviderAccountWebContentJsonConnectorConfig
   | ProviderAccountPluginConnectorConfig
   | ProviderAccountLocalEstimateConnectorConfig;
 
@@ -282,6 +313,24 @@ export type ProviderAccountHttpJsonConnectorConfig = ProviderAccountConnectorBas
   method?: "GET" | "POST";
   parser?: ProviderAccountHttpJsonParser;
   type: "http-json";
+};
+
+export type ProviderAccountWebContentJsonConnectorConfig = ProviderAccountConnectorBaseConfig & {
+  body?: unknown;
+  browser?: {
+    credentials?: ProviderAccountBrowserCredentialsMode;
+    headerTemplates?: Record<string, string>;
+    loginUrl?: string;
+    partition?: "built-in-browser";
+    requestOrigin?: string;
+    timeoutMs?: number;
+  };
+  endpoint: string;
+  headers?: Record<string, string>;
+  mapping: ProviderAccountMappingConfig;
+  method?: "GET" | "POST";
+  parser?: ProviderAccountHttpJsonParser;
+  type: "webcontent-json";
 };
 
 export type ProviderAccountPluginConnectorConfig = ProviderAccountConnectorBaseConfig & {
@@ -457,10 +506,29 @@ export type ProviderCatalogModelsResult = {
   providerName?: string;
 };
 
+export type OpenRouterProviderCatalogRequest = {
+  apiKey?: string;
+  baseUrl?: string;
+  model?: string;
+};
+
+export type OpenRouterProviderCatalogItem = {
+  name: string;
+  quantizations?: string[];
+  slug: string;
+  tokensYesterday?: number;
+  uptimePercent?: number;
+};
+
+export type OpenRouterProviderCatalogResult = {
+  loadedFrom?: string;
+  providers: OpenRouterProviderCatalogItem[];
+};
+
 export type ProviderAccountTestRequest = {
   apiKey?: string;
   baseUrl: string;
-  connector: ProviderAccountHttpJsonConnectorConfig;
+  connector: ProviderAccountHttpJsonConnectorConfig | ProviderAccountWebContentJsonConnectorConfig;
   providerName?: string;
 };
 
@@ -640,7 +708,7 @@ export type RouterRuleRewrite = {
 };
 
 export const ROUTER_SCRIPT_API_VERSION = 1 as const;
-export const ROUTER_SCRIPT_MAX_SOURCE_BYTES = 64 * 1024;
+export const ROUTER_SCRIPT_MAX_SOURCE_BYTES = 5 * 1024 * 1024;
 export const ROUTER_SCRIPT_DEFAULT_TIMEOUT_MS = 2_000;
 export const ROUTER_SCRIPT_MAX_TIMEOUT_MS = 30_000;
 
@@ -692,6 +760,12 @@ export type RouterConfig = {
   rules: RouterRule[];
 };
 
+export type ProfileRoutingConfig = {
+  enabled: boolean;
+  enhancedRoute: boolean;
+  rules: RouterRule[];
+};
+
 export type RouteScriptDiagnostic = {
   code: string;
   column?: number;
@@ -731,7 +805,6 @@ export type GatewayRuntimeConfig = {
   coreHost: string;
   corePort: number;
   enabled: boolean;
-  generatedConfigFile: string;
   host: string;
   port: number;
 };
@@ -812,6 +885,7 @@ export const GATEWAY_PLUGIN_PERMISSION_IDS = [
   "proxy-routes",
   "http-backends",
   "provider-account-connectors",
+  "gateway-request-transforms",
   "core-gateway-config",
   "core-provider-plugins",
   "virtual-model-profiles",
@@ -991,8 +1065,10 @@ export type VirtualModelMaterializationConfig = {
 export type VirtualModelFusionVisionConfig = {
   apiKey?: string;
   baseUrl?: string;
+  fallbackModels?: string[];
   model?: string;
   modelSelector?: string;
+  retryCount?: number;
   timeoutMs?: number;
   toolName?: string;
 };
@@ -1017,11 +1093,15 @@ export type VirtualModelFusionWebSearchConfig = {
 
 export type VirtualModelFusionMediaConfig = {
   imageEditToolName?: string;
+  imageFallbackModelSelectors?: string[];
   imageGenerateToolName?: string;
   imageModelSelector?: string;
+  imageRetryCount?: number;
   jobCancelToolName?: string;
   jobGetToolName?: string;
+  videoFallbackModelSelectors?: string[];
   videoModelSelector?: string;
+  videoRetryCount?: number;
   videoStartToolName?: string;
 };
 
@@ -1312,8 +1392,13 @@ export type OverviewMetricKind =
   | "success-rate"
   | "total-tokens";
 
+export type OverviewAccountCardSize = "1:1" | "1:2" | "2:1" | "2:2";
+
 export type OverviewWidgetConfig = {
+  accountCardOrder?: string[];
+  accountCardSizes?: Record<string, OverviewAccountCardSize>;
   accountProvider?: string;
+  accountProviders?: string[];
   enabled: boolean;
   id: string;
   metric?: OverviewMetricKind;
@@ -1375,7 +1460,7 @@ export const DEFAULT_TRAY_WIDGETS: TrayWidgetConfig[] = [
   { id: "model-share", type: "model-share", variant: DEFAULT_TRAY_COMPONENT_VARIANTS.modelShare }
 ];
 
-export type ProfileClientKind = "claude-code" | "codex" | "grok" | "kimi" | "opencode" | "pi" | "zcode" | "claude-design";
+export type ProfileClientKind = "claude-code" | "codex" | "grok" | "kimi" | "kilo" | "opencode" | "pi" | "workbuddy" | "zcode" | "claude-design";
 export type CodexProfileConfigFormat = "legacy" | "separate_profile_files";
 export type CodexRemoteFrontendMode = "app" | "cli" | "claude-code";
 export type ProfileScope = "ccr" | "global" | "custom";
@@ -1432,6 +1517,7 @@ export type ProfileConfig = {
   providerId?: string;
   providerName?: string;
   remoteFrontendMode?: CodexRemoteFrontendMode;
+  routing?: ProfileRoutingConfig;
   scope?: ProfileScope;
   showAllSessions?: boolean;
   settingsFile?: string;
@@ -1780,7 +1866,7 @@ export type GatewayStatus = {
   coreEndpoint: string;
   coreManagedExternally?: boolean;
   endpoint: string;
-  generatedConfigFile: string;
+  gatewayManagedExternally?: boolean;
   lastError?: string;
   lastStartedAt?: string;
   networkEndpoints: GatewayNetworkEndpoint[];
@@ -1905,10 +1991,12 @@ export type ProxyCertificateInstallResult = {
 export type ProxyNetworkCaptureState = "complete" | "error" | "pending";
 
 export type ProxyNetworkBody = {
+  bodyRef?: string;
   contentType?: string;
   decodedFrom?: string;
   encoding: "base64" | "utf8";
   error?: string;
+  preview?: boolean;
   sizeBytes: number;
   text: string;
   truncated: boolean;
@@ -1962,6 +2050,28 @@ export type RequestLogDetailRequest = {
 };
 
 export type RequestLogBody = ProxyNetworkBody;
+
+export type RequestLogBodySide = "request" | "response";
+
+export type RequestLogBodyChunkRequest = {
+  id: number;
+  length?: number;
+  offset?: number;
+  side: RequestLogBodySide;
+};
+
+export type RequestLogBodyChunk = {
+  bodyRef?: string;
+  contentType?: string;
+  encoding: "base64" | "utf8";
+  eof: boolean;
+  length: number;
+  nextOffset?: number;
+  offset: number;
+  sizeBytes: number;
+  text: string;
+  truncated: boolean;
+};
 
 export type RequestLogRetryAttempt = {
   attempt: number;
@@ -2164,7 +2274,7 @@ export type UsageStatsSnapshot = {
   totals: UsageTotals;
 };
 
-export type AgentKind = "claude-code" | "codex" | "grok" | "kimi" | "opencode" | "pi" | "zcode" | "claude-design" | "unknown";
+export type AgentKind = "claude-code" | "codex" | "grok" | "kimi" | "kilo" | "opencode" | "pi" | "workbuddy" | "zcode" | "claude-design" | "unknown";
 
 export type AgentAnalysisFilter = {
   agent?: AgentKind | "all";
@@ -2279,7 +2389,7 @@ export type AgentAnalysisSubagentRow = {
 
 export type AgentAnalysisTraceRunKind = "agent" | "llm" | "route" | "subagent" | "tool";
 
-export type AgentAnalysisTraceRunStatus = "error" | "success";
+export type AgentAnalysisTraceRunStatus = "error" | "partial" | "success";
 
 export type AgentAnalysisTracePayloadPreview = {
   kind: "empty" | "json" | "text";
@@ -2317,6 +2427,7 @@ export type AgentAnalysisTraceRun = {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   concurrentRequests: number;
+  costUsd?: number;
   depth: number;
   durationMs: number;
   endedAt: string;
@@ -2412,7 +2523,37 @@ export type AgentObservabilityErrorRow = {
   userAgent?: string;
 };
 
+export type AgentAnalysisConversationRole = "assistant" | "context" | "developer" | "system" | "tool" | "user";
+
+export type AgentAnalysisConversationMessage = {
+  content: string;
+  sourcePreview: boolean;
+  sourceTruncated: boolean;
+  truncated: boolean;
+};
+
+export type AgentAnalysisConversationItem = AgentAnalysisConversationMessage & {
+  id: string;
+  role: AgentAnalysisConversationRole;
+};
+
+export type AgentAnalysisConversationTurn = {
+  agent: AgentKind;
+  assistant?: AgentAnalysisConversationMessage;
+  createdAt: string;
+  durationMs: number;
+  id: number;
+  messages?: AgentAnalysisConversationItem[];
+  model: string;
+  provider: string;
+  requestId: string;
+  sessionId: string;
+  statusCode: number;
+  user?: AgentAnalysisConversationMessage;
+};
+
 export type AgentAnalysisSessionDetail = {
+  conversation: AgentAnalysisConversationTurn[];
   endpoints: AgentObservabilityEndpointRow[];
   errors: AgentObservabilityErrorRow[];
   models: AgentAnalysisSessionModelRow[];
@@ -2436,6 +2577,8 @@ export type AgentAnalysisSnapshot = {
   range: UsageStatsRange;
   recentRequests: AgentAnalysisRequestRow[];
   routes: AgentObservabilityRouteRow[];
+  requestScanLimit: number;
+  requestScanTruncated: boolean;
   scannedRequestCount: number;
   selectedSession?: AgentAnalysisSessionDetail;
   sessions: AgentAnalysisSessionRow[];

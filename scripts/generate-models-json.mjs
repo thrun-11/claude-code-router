@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
-import { writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -29,6 +31,10 @@ const sources = {
 const sourceOrder = ["models.dev", "litellm", "openrouter"];
 const support1MContextThreshold = 1_000_000;
 const schemaVersion = 2;
+const fetchAttempts = 3;
+const fetchRetryDelayMs = 500;
+const fetchTimeoutMs = 15_000;
+const execFileAsync = promisify(execFile);
 
 const firstPartyProviderAliases = new Map(Object.entries({
   ai21: "ai21",
@@ -81,11 +87,33 @@ const providerHints = [
 ];
 
 async function main() {
-  const [modelsDevPayload, liteLlmPayload, openRouterPayload] = await Promise.all([
-    fetchJson(sources.modelsDev.url),
-    fetchJson(sources.litellm.url),
-    fetchJson(sources.openrouter.url)
-  ]);
+  const sourceRequests = [
+    sources.modelsDev,
+    sources.litellm,
+    sources.openrouter
+  ];
+  const sourceResults = await Promise.allSettled(
+    sourceRequests.map((source) => fetchJson(source.url))
+  );
+  const failures = sourceResults.flatMap((result, index) =>
+    result.status === "rejected"
+      ? [`${sourceRequests[index].id}: ${formatError(result.reason)}`]
+      : []
+  );
+  if (failures.length > 0) {
+    const existingCatalog = await readExistingCatalog();
+    if (existingCatalog) {
+      console.warn(`[models] Refresh failed (${failures.join("; ")}).`);
+      console.warn(
+        `[models] Keeping the checked-in catalog with ${existingCatalog.models.length} model records.`
+      );
+      return;
+    }
+    throw new Error(`Failed to refresh the model catalog: ${failures.join("; ")}`);
+  }
+  const [modelsDevPayload, liteLlmPayload, openRouterPayload] = sourceResults.map(
+    (result) => result.value
+  );
 
   const entries = new Map();
   ingestModelsDev(entries, modelsDevPayload);
@@ -117,11 +145,66 @@ async function main() {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url, { headers: { accept: "application/json" } });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${url}: HTTP ${response.status}`);
+  let lastError;
+  for (let attempt = 1; attempt <= fetchAttempts; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(fetchTimeoutMs)
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+      if (attempt < fetchAttempts) {
+        await delay(fetchRetryDelayMs * attempt);
+      }
+    }
   }
-  return response.json();
+  try {
+    return await fetchJsonWithCurl(url);
+  } catch (curlError) {
+    throw new Error(
+      `Failed to fetch ${url} after ${fetchAttempts} attempts: ${formatError(lastError)}; curl fallback failed: ${formatError(curlError)}`
+    );
+  }
+}
+
+async function fetchJsonWithCurl(url) {
+  const { stdout } = await execFileAsync(
+    "curl",
+    ["-sL", "--fail", "--max-time", String(Math.ceil(fetchTimeoutMs / 1000)), "-H", "accept: application/json", url],
+    {
+      encoding: "utf8",
+      maxBuffer: 128 * 1024 * 1024,
+      windowsHide: true
+    }
+  );
+  return JSON.parse(stdout);
+}
+
+async function readExistingCatalog() {
+  try {
+    const payload = JSON.parse(await readFile(outputPath, "utf8"));
+    return isRecord(payload) &&
+      payload.schemaVersion === schemaVersion &&
+      Array.isArray(payload.models) &&
+      payload.models.length > 0
+      ? payload
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function delay(milliseconds) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function formatError(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function ingestModelsDev(entries, payload) {

@@ -6,7 +6,7 @@ import {
   useState,
   UserRound, X
 } from "../shared/index";
-import { AddProviderForm, providerSetupStepIds, type ProviderSetupStepId } from "./providers";
+import { AddProviderForm, ProviderConnectivityCheckDialog, providerSetupStepIds, type ProviderSetupStepId } from "./providers";
 import { AddProfileForm } from "./profiles";
 
 type OnboardingMascotTone = "cyan" | "orange" | "violet";
@@ -34,27 +34,6 @@ const onboardingStepDetails: Record<OnboardingStepId, {
     icon: Gauge,
     title: "Let's start",
     tone: "cyan"
-  }
-};
-
-const onboardingMascotPalettes: Record<OnboardingMascotTone, { accent: string; glow: string; main: string; shadow: string }> = {
-  cyan: {
-    accent: "#8CF7FF",
-    glow: "rgba(34, 211, 238, 0.22)",
-    main: "#22D3EE",
-    shadow: "rgba(8, 145, 178, 0.22)"
-  },
-  orange: {
-    accent: "#FFD166",
-    glow: "rgba(249, 115, 22, 0.2)",
-    main: "#F97316",
-    shadow: "rgba(194, 65, 12, 0.22)"
-  },
-  violet: {
-    accent: "#C084FC",
-    glow: "rgba(139, 92, 246, 0.2)",
-    main: "#8B5CF6",
-    shadow: "rgba(109, 40, 217, 0.22)"
   }
 };
 
@@ -90,7 +69,7 @@ export function OnboardingView({
   config: AppConfig;
   endpoint: string;
   gatewayStatus: GatewayStatus;
-  onCheckProvider: () => Promise<ProviderConnectivityCheckReport>;
+  onCheckProvider: (models?: string[]) => Promise<ProviderConnectivityCheckReport>;
   onChangeProfile: (patch: Partial<AddProfileDraft>) => void;
   onChangeProvider: (patch: Partial<AddProviderDraft>, resetProbe?: boolean) => void;
   onComplete: () => void | Promise<void>;
@@ -109,6 +88,7 @@ export function OnboardingView({
 }) {
   const t = useAppText();
   const shouldReduceMotion = useReducedMotion();
+  const [providerCheckOpen, setProviderCheckOpen] = useState(false);
   const [providerIconDetecting, setProviderIconDetecting] = useState(false);
   const [providerSetupStep, setProviderSetupStep] = useState<ProviderSetupStepId>("provider");
   const providerReady = isOnboardingProviderReady(config);
@@ -126,7 +106,8 @@ export function OnboardingView({
       ? providerDraftHasReadyCredentialPool(providerDraft)
       : providerDraft.apiKey.trim()
   );
-  const providerModelsReady = mergeProviderModelLists(providerDraft.selectedModels, splitLines(providerDraft.modelsText)).length > 0;
+  const providerCheckModels = mergeProviderModelLists(providerDraft.selectedModels, splitLines(providerDraft.modelsText));
+  const providerModelsReady = providerCheckModels.length > 0;
   const providerSetupIndex = Math.max(0, providerSetupStepIds.indexOf(providerSetupStep));
   const previousProviderSetupStep = activeStep === "provider" ? providerSetupStepIds[providerSetupIndex - 1] : undefined;
   const nextProviderSetupStep = activeStep === "provider" ? providerSetupStepIds[providerSetupIndex + 1] : undefined;
@@ -281,7 +262,7 @@ export function OnboardingView({
                       error={providerError}
                       activeStep={providerSetupStep}
                       mode={providerReady ? "edit" : "add"}
-                      onCheck={onCheckProvider}
+                      onCheck={async () => setProviderCheckOpen(true)}
                       onChange={onChangeProvider}
                       onIconDetectingChange={setProviderIconDetecting}
                       onSelectStep={(step) => {
@@ -351,6 +332,15 @@ export function OnboardingView({
           </motion.div>
         </div>
       </div>
+
+      {providerCheckOpen ? (
+        <ProviderConnectivityCheckDialog
+          connectivityLoading={providerConnectivityLoading}
+          models={providerCheckModels}
+          onCheck={onCheckProvider}
+          onClose={() => setProviderCheckOpen(false)}
+        />
+      ) : null}
     </motion.div>
   );
 }

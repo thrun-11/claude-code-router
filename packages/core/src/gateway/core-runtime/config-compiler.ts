@@ -4,25 +4,27 @@
 import { join as pathJoin } from "node:path";
 import { isGatewayProviderEnabled } from "@ccr/core/contracts/app";
 import type { AppConfig, GatewayProviderConfig, GatewayProviderProtocol, VirtualModelProfileConfig } from "@ccr/core/contracts/app";
-import { codexDefaultBaseUrl, kimiAccessTokenExpired, kimiIdentityHeaders, readClaudeCodeOauth, readCodexAuth, readGrokAuth, readKimiAuth, resolveGrokAuth, resolveKimiAuth } from "@ccr/core/agents/local-providers/service";
+import { codexDefaultBaseUrl, kimiAccessTokenExpired, kimiIdentityHeaders, localAgentProviderApiKey, readClaudeCodeOauth, readCodexAuth, readGrokAuth, readKimiAuth, resolveGrokAuth, resolveKimiAuth } from "@ccr/core/agents/local-providers/service";
 import { grokAccessTokenExpired, grokClientVersion } from "@ccr/core/agents/local-providers/grok";
 import { pluginService } from "@ccr/core/plugins/service";
 import { normalizeRouteSelector, providerRuntimeId } from "@ccr/core/routing/model-registry";
 import { isRecord, stringListValue, stringValue } from "@ccr/core/gateway/internal/value";
-import { fusionBuiltinToolArtifacts, fusionToolFallbackMcpServer, normalizeFusionWebSearchProfileToolName, toolHubMcpServer, withCodexCompatibleVirtualModelProfiles, withFusionVirtualModelAliases, withFusionWebSearchToolInstructions } from "@ccr/core/mcp/fusion-config";
+import { fusionBuiltinToolArtifacts, fusionToolFallbackMcpServer, normalizeFusionWebSearchProfileToolName, toolHubMcpServer, withCodexCompatibleVirtualModelProfiles, withFusionVirtualModelAliases, withFusionVisionToolInstructions, withFusionWebSearchToolInstructions } from "@ccr/core/mcp/fusion-config";
 import { mediaToolsMcpServer } from "@ccr/core/mcp/grok-media-config";
 import { resolveGatewayPublicModelId } from "@ccr/core/gateway/features/model-discovery";
 import { activeProviderCredentials, inferProtocol, normalizedProviderCapabilities, normalizeProviderProtocol, providerCapabilityForClientProtocol, providerCapabilityInternalName, providerCapabilityNameMatches, providerCredentialInternalName, providerProtocolForClientProtocol, sortProviderCredentialsForConfig, toCoreGatewayProviders } from "@ccr/core/providers/runtime-topology";
 import { buildRawTraceConfig } from "@ccr/core/observability/raw-trace-sync";
-import { endpoint, resolveUndiciProxyAgentModule, writeGatewayProxyPreloadFile } from "@ccr/core/gateway/core-runtime/supervisor";
+import { endpoint, resolveLocalAgentAuthProviderHookEntry, resolveUndiciProxyAgentModule, resolveUpstreamHeaderSanitizerEntry, writeGatewayProxyPreloadFile } from "@ccr/core/gateway/core-runtime/supervisor";
 import { billingUsageSyncHeader, billingUsageSyncPath, claudeCodeOauthBetaHeader, claudeCodeOauthRequiredBeta, coreGatewayAuthHeader, coreGatewayAuthTokenEnv } from "@ccr/core/gateway/internal/shared";
 import type { BrowserWebSearchMcpIntegration, CoreGatewayProvider } from "@ccr/core/gateway/internal/shared";
 import { uniqueStrings } from "@ccr/core/gateway/internal/collections";
 import { isLocalClaudeCodeOauthProviderPlugin, mergeAnthropicBetaValues } from "@ccr/core/providers/oauth-plugin";
+import { isLocalAgentOauthProviderPlugin } from "@ccr/core/gateway/core-runtime/local-agent-auth-provider-hook";
 import { resolveConfiguredProviderModelSelector, resolveUniqueConfiguredProviderModelSelector } from "@ccr/core/routing/model-resolution";
 
 const upstreamHeaderSanitizerPluginKey = "ccr-upstream-header-sanitizer";
 const upstreamMinOutputTokensPluginKey = "ccr-upstream-min-output-tokens";
+const localAgentAuthProviderHookPluginKey = "ccr-local-agent-auth-provider-hooks";
 export const unlimitedVirtualModelToolCalls = Number.MAX_SAFE_INTEGER;
 export const unlimitedVirtualModelToolTurns = Number.MAX_SAFE_INTEGER;
 
@@ -39,16 +41,26 @@ export async function compileCoreGatewayConfig(
   const configuredGatewayPlugins = Array.isArray(pluginCoreGatewayConfig.plugins)
     ? pluginCoreGatewayConfig.plugins.filter((plugin) => {
         const key = isRecord(plugin) ? stringValue(plugin.key) : undefined;
-        return key !== upstreamHeaderSanitizerPluginKey && key !== upstreamMinOutputTokensPluginKey;
+        return (
+          key !== localAgentAuthProviderHookPluginKey &&
+          key !== upstreamHeaderSanitizerPluginKey &&
+          key !== upstreamMinOutputTokensPluginKey
+        );
       })
     : [];
   const pluginBillingConfig = isRecord(pluginCoreGatewayConfig.billing) ? pluginCoreGatewayConfig.billing : {};
-  const configuredProviderPlugins = normalizeClaudeCodeOauthProviderPlugins([
-    ...(config.providerPlugins ?? []).filter(providerPluginEnabled),
-    ...pluginService.getCoreProviderPlugins().filter(providerPluginEnabled)
+  const allConfiguredProviderPlugins = normalizeClaudeCodeOauthProviderPlugins([
+    ...(config.providerPlugins ?? []),
+    ...pluginService.getCoreProviderPlugins()
   ]);
+  const configuredProviderPlugins = allConfiguredProviderPlugins.filter(providerPluginEnabled);
+  const configuredProviderPluginsWithLocalCodexFallbacks = withMissingCodexOauthProviderPlugins(
+    configuredProviderPlugins,
+    allConfiguredProviderPlugins,
+    config.Providers.filter(isGatewayProviderEnabled)
+  );
   const providerPluginsWithRuntimeDefaults = await withKimiOauthRuntimeDefaults(
-    await withGrokOauthRuntimeDefaults(withClaudeCodeOauthRuntimeDefaults(withCodexOauthRuntimeDefaults(configuredProviderPlugins)))
+    await withGrokOauthRuntimeDefaults(withClaudeCodeOauthRuntimeDefaults(withCodexOauthRuntimeDefaults(configuredProviderPluginsWithLocalCodexFallbacks)))
   );
   const codexOauthProviderNames = codexOauthLocalProviderNames(providerPluginsWithRuntimeDefaults);
   const enabledProviders = config.Providers.filter(isGatewayProviderEnabled);
@@ -56,7 +68,7 @@ export async function compileCoreGatewayConfig(
   const providerPluginsWithCapabilityAliases = withProviderCapabilityPluginAliases(providerPlugins, enabledProviders);
   const virtualModelProfiles = coreGatewayVirtualModelProfiles(config);
   const coreEndpoint = endpoint(config.gateway.coreHost, config.gateway.corePort);
-  const proxyPreloadFile = upstreamProxyUrl ? writeGatewayProxyPreloadFile(config, upstreamProxyUrl) : undefined;
+  const proxyPreloadFile = upstreamProxyUrl ? writeGatewayProxyPreloadFile() : undefined;
   const proxyEnv = upstreamProxyUrl
     ? { CCR_UPSTREAM_PROXY_URL: upstreamProxyUrl, CCR_UNDICI_MODULE: resolveUndiciProxyAgentModule() }
     : undefined;
@@ -79,6 +91,7 @@ export async function compileCoreGatewayConfig(
       .filter((provider): provider is CoreGatewayProvider => Boolean(provider)),
     ...builtinToolArtifacts.providers
   ];
+  const localAgentAuthProviderHookPlugin = localAgentAuthProviderHookPluginConfig(providerPluginsWithCapabilityAliases);
   const pluginAgentConfig = isRecord(pluginCoreGatewayConfig.agent) ? pluginCoreGatewayConfig.agent : {};
   const pluginMcpServers = Array.isArray(pluginAgentConfig.mcpServers) ? pluginAgentConfig.mcpServers : [];
   const externalMcpServers = [
@@ -135,10 +148,11 @@ export async function compileCoreGatewayConfig(
     port: config.gateway.corePort,
     plugins: [
       ...configuredGatewayPlugins,
+      ...(localAgentAuthProviderHookPlugin ? [localAgentAuthProviderHookPlugin] : []),
       {
         enabled: true,
         key: upstreamHeaderSanitizerPluginKey,
-        modulePath: pathJoin(__dirname, "upstream-header-sanitizer.js")
+        modulePath: resolveUpstreamHeaderSanitizerEntry()
       },
       {
         enabled: true,
@@ -158,6 +172,16 @@ export async function compileCoreGatewayConfig(
   };
 }
 
+function localAgentAuthProviderHookPluginConfig(providerPlugins: unknown[]): Record<string, unknown> | undefined {
+  if (!providerPlugins.some(isLocalAgentOauthProviderPlugin)) {
+    return undefined;
+  }
+  return {
+    enabled: true,
+    key: localAgentAuthProviderHookPluginKey,
+    modulePath: resolveLocalAgentAuthProviderHookEntry()
+  };
+}
 
 function withProviderCapabilityPluginAliases(
   providerPlugins: unknown[],
@@ -203,6 +227,88 @@ function withProviderCapabilityPluginAliases(
 
 function providerPluginEnabled(plugin: unknown): boolean {
   return !isRecord(plugin) || plugin.enabled !== false;
+}
+
+
+function withMissingCodexOauthProviderPlugins(
+  providerPlugins: unknown[],
+  explicitProviderPlugins: unknown[],
+  providers: GatewayProviderConfig[]
+): unknown[] {
+  const codexAuth = readCodexAuth();
+  if (!codexAuth?.accessToken && !codexAuth?.refreshToken) {
+    return providerPlugins;
+  }
+
+  const codexOauthProviderNames = codexOauthLocalProviderNames(explicitProviderPlugins);
+  const additions: unknown[] = [];
+  for (const provider of providers) {
+    if (!isLocalCodexOauthProvider(provider)) {
+      continue;
+    }
+    const runtimeName = providerRuntimeId(provider);
+    const capabilityName = providerCapabilityInternalName(provider, "openai_responses");
+    if (
+      codexOauthProviderNames.has(provider.name) ||
+      codexOauthProviderNames.has(runtimeName) ||
+      codexOauthProviderNames.has(capabilityName)
+    ) {
+      continue;
+    }
+
+    const keyPrefix = `ccr-local-agent-${providerNameSlug(runtimeName)}`;
+    additions.push({
+      codexOauth: {
+        accessToken: codexAuth.accessToken,
+        ...(codexAuth.accountId ? { accountId: codexAuth.accountId } : {}),
+        refreshIfMissingAccessToken: true,
+        refreshToken: codexAuth.refreshToken,
+        required: true
+      },
+      key: `${keyPrefix}-codex-oauth-recovered`,
+      providerName: provider.name
+    });
+  }
+
+  return additions.length > 0 ? [...providerPlugins, ...additions] : providerPlugins;
+}
+
+function isLocalCodexOauthProvider(provider: GatewayProviderConfig): boolean {
+  const protocol =
+    normalizeProviderProtocol(provider.type) ??
+    normalizeProviderProtocol(provider.provider) ??
+    inferProtocol(provider);
+  return protocol === "openai_responses" &&
+    providerApiKeyValue(provider) === localAgentProviderApiKey &&
+    normalizeCodexProviderBaseUrl(providerBaseUrlValue(provider)) === normalizeCodexProviderBaseUrl(codexDefaultBaseUrl);
+}
+
+function providerApiKeyValue(provider: GatewayProviderConfig): string {
+  return provider.api_key || provider.apiKey || provider.apikey || "";
+}
+
+function providerBaseUrlValue(provider: GatewayProviderConfig): string {
+  return provider.api_base_url || provider.baseurl || provider.baseUrl || "";
+}
+
+function normalizeCodexProviderBaseUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    url.search = "";
+    url.pathname = url.pathname.replace(/\/+$/g, "");
+    return url.toString().replace(/\/+$/g, "");
+  } catch {
+    return value.trim().replace(/\/+$/g, "");
+  }
+}
+
+function providerNameSlug(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "provider";
 }
 
 
@@ -282,15 +388,28 @@ function normalizeCoreGatewayVirtualModelProfile(profile: unknown, config: AppCo
   const rewrittenVisionSelector = fusionVision && !visionBaseUrl && visionSelector
     ? rewriteModelSelectorForCoreGatewayProfile(visionSelector, config, "openai_chat_completions")
     : undefined;
+  const visionFallbackModels = stringListValue(fusionVision?.fallbackModels);
+  const rewrittenVisionFallbackModels = fusionVision && !visionBaseUrl
+    ? uniqueStrings(visionFallbackModels.map((model) => rewriteModelSelectorForCoreGatewayProfile(model, config, "openai_chat_completions")))
+    : visionFallbackModels;
+  const visionFallbackModelsChanged = !stringArraysEqual(rewrittenVisionFallbackModels, visionFallbackModels);
 
-  if (metadata && fusionVision && visionSelectorField && rewrittenVisionSelector && rewrittenVisionSelector !== visionSelector) {
+  if (
+    metadata &&
+    fusionVision &&
+    (
+      (visionSelectorField && rewrittenVisionSelector && rewrittenVisionSelector !== visionSelector) ||
+      visionFallbackModelsChanged
+    )
+  ) {
     nextProfile = {
       ...sourceProfile,
       metadata: {
         ...metadata,
         fusionVision: {
           ...fusionVision,
-          [visionSelectorField]: rewrittenVisionSelector
+          ...(visionSelectorField && rewrittenVisionSelector ? { [visionSelectorField]: rewrittenVisionSelector } : {}),
+          ...(visionFallbackModelsChanged ? { fallbackModels: rewrittenVisionFallbackModels } : {})
         }
       }
     };
@@ -312,7 +431,8 @@ function normalizeCoreGatewayVirtualModelProfile(profile: unknown, config: AppCo
         }
       };
   const profileAfterWebSearchToolName = normalizeFusionWebSearchProfileToolName(profileWithoutToolLoopLimits) ?? profileWithoutToolLoopLimits;
-  return withFusionWebSearchToolInstructions(profileAfterWebSearchToolName) ?? profileAfterWebSearchToolName;
+  const profileAfterWebSearchInstructions = withFusionWebSearchToolInstructions(profileAfterWebSearchToolName) ?? profileAfterWebSearchToolName;
+  return withFusionVisionToolInstructions(profileAfterWebSearchInstructions) ?? profileAfterWebSearchInstructions;
 }
 
 
@@ -358,6 +478,10 @@ function coreGatewayProviderSelectorName(
   return capability ? providerCapabilityInternalName(provider, protocol) : providerRuntimeId(provider);
 }
 
+function stringArraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 
 function withCodexOauthRuntimeDefaults(providerPlugins: unknown[]): unknown[] {
   const codexAuth = readCodexAuth();
@@ -369,9 +493,9 @@ function withCodexOauthRuntimeDefaults(providerPlugins: unknown[]): unknown[] {
     const codexOauth = plugin.codexOauth;
     const nextCodexOauth = {
       ...codexOauth,
-      ...(!hasOwn(codexOauth, "accountId") && !hasOwn(codexOauth, "account_id") && codexAuth?.accountId
-        ? { accountId: codexAuth.accountId }
-        : {})
+      ...(codexAuth?.accessToken ? { accessToken: codexAuth.accessToken } : {}),
+      ...(codexAuth?.refreshToken ? { refreshToken: codexAuth.refreshToken } : {}),
+      ...(codexAuth?.accountId ? { accountId: codexAuth.accountId } : {})
     };
     const nextPlugin: Record<string, unknown> = {
       ...plugin,
@@ -439,6 +563,7 @@ async function withGrokOauthRuntimeDefaults(providerPlugins: unknown[]): Promise
     const currentHeaders = isRecord(currentAuth.headers) ? currentAuth.headers : {};
     const currentRequest = isRecord(plugin.request) ? plugin.request : {};
     const currentRequestHeaders = isRecord(currentRequest.headers) ? currentRequest.headers : {};
+    const currentBodyRemove = Array.isArray(currentRequest.bodyRemove) ? currentRequest.bodyRemove : [];
     return {
       ...plugin,
       auth: {
@@ -450,6 +575,12 @@ async function withGrokOauthRuntimeDefaults(providerPlugins: unknown[]): Promise
       },
       request: {
         ...currentRequest,
+        bodyRemove: uniqueStrings([
+          ...currentBodyRemove
+            .map((value) => stringValue(value))
+            .filter((value): value is string => Boolean(value)),
+          "external_web_access"
+        ]),
         headers: {
           ...currentRequestHeaders,
           "x-grok-client-identifier": "xai-grok-cli",
@@ -522,14 +653,19 @@ function withCodexOauthProviderBaseUrl(
   provider: GatewayProviderConfig,
   codexOauthProviderNames: Set<string>
 ): GatewayProviderConfig {
-  if (!codexOauthProviderNames.has(provider.name)) {
-    return provider;
-  }
-
   const protocol =
     normalizeProviderProtocol(provider.type) ??
     normalizeProviderProtocol(provider.provider) ??
     inferProtocol(provider);
+  const names = [
+    provider.name,
+    providerRuntimeId(provider),
+    providerCapabilityInternalName(provider, "openai_responses")
+  ];
+  if (!names.some((name) => codexOauthProviderNames.has(name))) {
+    return provider;
+  }
+
   if (protocol !== "openai_responses") {
     return provider;
   }
@@ -702,9 +838,4 @@ function addProviderNameVariants(names: Set<string>, providerName: string | unde
   if (capabilitySeparatorIndex > 0) {
     names.add(providerName.slice(0, capabilitySeparatorIndex));
   }
-}
-
-
-function hasOwn(value: Record<string, unknown>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key);
 }

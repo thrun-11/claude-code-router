@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, shell } from "electron";
 import { setupApplicationMenu } from "./app-menu";
 import { loadAppConfig } from "@ccr/core/config/config";
+import { loadOnboardingFinished } from "@ccr/core/config/onboarding-state";
 import { restoreClaudeAppGatewayConfig, syncClaudeAppGatewayConfig } from "@ccr/core/agents/claude-app/gateway-service";
 import { deepLinkService } from "./deep-link";
 import { gatewayService } from "@ccr/core/gateway/service";
@@ -16,6 +17,8 @@ import { browserWebSearchMcpService } from "./electron-web-search-mcp";
 import { applyNativeThemePreference } from "./native-theme";
 import windowsManager from "./windows";
 import { closeRequestLogRuntime } from "@ccr/core/observability/request-log-store";
+import { stopProviderModelAutoRefreshService, syncProviderModelAutoRefreshService } from "@ccr/core/providers/model-auto-refresh";
+import type { AppConfig } from "@ccr/core/contracts/app";
 
 const gotTheLock = app.requestSingleInstanceLock();
 const quitProxyRestoreTimeoutMs = 30_000;
@@ -44,7 +47,9 @@ function startPrimaryInstance(): void {
   });
 
   void app.whenReady().then(async () => {
-    applyNativeThemePreference((await loadAppConfig()).theme);
+    const config = await loadAppConfig();
+    applyNativeThemePreference(config.theme);
+    windowsManager.setOnboardingFinished(await loadOnboardingFinished());
     configureProxyDesktopIntegration();
     let ccrLauncherPreparation: CcrCliLauncherPreparation | undefined;
     try {
@@ -173,6 +178,7 @@ function handleTerminationSignal(signal: NodeJS.Signals): void {
 
 function stopServicesForQuit(): Promise<void> {
   if (!stopForQuitPromise) {
+    stopProviderModelAutoRefreshService();
     stopForQuitPromise = gatewayService
       .stop({ proxyRestoreTimeoutMs: quitProxyRestoreTimeoutMs })
       .then(() => undefined)
@@ -223,7 +229,7 @@ function startConfiguredServices(reason: string): Promise<void> {
         } catch (error) {
           console.error(`Failed to sync launch-at-login setting during ${reason}: ${formatError(error)}`);
         }
-        const status = await gatewayService.start(config);
+        const status = await gatewayService.ensureStarted(config);
         if (status.state === "error") {
           console.error(`Failed to start gateway during ${reason}: ${status.lastError}`);
         }
@@ -239,6 +245,7 @@ function startConfiguredServices(reason: string): Promise<void> {
           const proxyStatus = await proxyService.ensureSystemProxyActive();
           logProxySystemProxyIssue(reason, proxyStatus);
         }
+        syncProviderModelAutoRefresh(config);
       })
       .catch((error) => {
         console.error(`Failed to start configured services during ${reason}: ${formatError(error)}`);
@@ -249,6 +256,24 @@ function startConfiguredServices(reason: string): Promise<void> {
       });
   }
   return startServicesPromise;
+}
+
+function syncProviderModelAutoRefresh(config: AppConfig): void {
+  syncProviderModelAutoRefreshService(config, {
+    logger: console,
+    onConfigChanged: async (nextConfig) => {
+      await gatewayService.updateConfig(nextConfig);
+      if (gatewayService.getStatus().state === "running") {
+        const profileResult = await applyProfileConfig(nextConfig);
+        for (const client of profileResult.clients) {
+          if (!client.ok) {
+            console.error(`Failed to apply ${client.client} profile during provider model refresh: ${client.message}`);
+          }
+        }
+      }
+      trayController.refreshUsageTitle();
+    }
+  });
 }
 
 function queueEnsureConfiguredProxyModeActive(reason: string): void {

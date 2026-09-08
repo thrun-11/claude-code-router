@@ -728,6 +728,7 @@ function codexModelMetadataFromItem(item: Record<string, unknown>): ProviderMode
   const contextWindow = readPositiveInteger(item.context_window ?? item.contextWindow);
   const effectiveContextWindowPercent = readPercentage(item.effective_context_window_percent ?? item.effectiveContextWindowPercent);
   const maxContextWindow = readPositiveInteger(item.max_context_window ?? item.maxContextWindow);
+  const maxOutputTokens = readPositiveInteger(item.max_output_tokens ?? item.maxOutputTokens ?? item.output_tokens ?? item.outputTokens);
   const serviceTiers = readArray(item.service_tiers) ?? readArray(item.serviceTiers);
   const supportedReasoningLevels =
     readReasoningLevels(item.supported_reasoning_levels) ??
@@ -738,6 +739,7 @@ function codexModelMetadataFromItem(item: Record<string, unknown>): ProviderMode
     readReasoningEfforts(item.reasoningEfforts);
   const defaultReasoningLevel = readNullableString(item.default_reasoning_level) ?? readNullableString(item.defaultReasoningLevel);
   const defaultReasoningSummary = readString(item.default_reasoning_summary) || readString(item.defaultReasoningSummary);
+  const supportsFastMode = readBoolean(item.supports_fast_mode) ?? readBoolean(item.supportsFastMode);
   const supportsReasoningSummaries = readBoolean(item.supports_reasoning_summaries) ?? readBoolean(item.supportsReasoningSummaries);
   const metadata: ProviderModelMetadata = {
     ...(additionalSpeedTiers ? { additionalSpeedTiers } : {}),
@@ -746,7 +748,9 @@ function codexModelMetadataFromItem(item: Record<string, unknown>): ProviderMode
     ...(defaultReasoningSummary ? { defaultReasoningSummary } : {}),
     ...(effectiveContextWindowPercent ? { effectiveContextWindowPercent } : {}),
     ...(maxContextWindow ? { maxContextWindow } : {}),
+    ...(maxOutputTokens ? { maxOutputTokens } : {}),
     ...(serviceTiers ? { serviceTiers } : {}),
+    ...(supportsFastMode !== undefined ? { supportsFastMode } : {}),
     ...(supportedReasoningLevels ? { supportedReasoningLevels } : {}),
     ...(supportsReasoningSummaries !== undefined ? { supportsReasoningSummaries } : {})
   };

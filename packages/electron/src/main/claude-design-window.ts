@@ -1,6 +1,6 @@
 import { gunzipSync } from "node:zlib";
 import type { Event as ElectronEvent, Session, WebContents } from "electron";
-import { loadPersistedApiKeys } from "@ccr/core/config/api-key-store";
+import { loadPersistedApiKeys } from "@ccr/core/config/config-repository";
 import {
   CLAUDE_DESIGN_PLUGIN_ID,
   CLAUDE_SHIP_PLUGIN_ID,
@@ -16,8 +16,13 @@ export type ClaudeDesignWindowCdpOptions = {
 
 type ClaudeDesignPluginStatus = {
   backend?: unknown;
+  frontendAssetsHost?: unknown;
+  frontendAssetsOrigin?: unknown;
+  frontendUrl?: unknown;
   proxy?: {
     fallbackHosts?: unknown;
+    frontendAssetsHost?: unknown;
+    frontendAssetsOrigin?: unknown;
     host?: unknown;
     paths?: unknown;
   };
@@ -89,6 +94,11 @@ export function claudeDesignCdpOptionsFromStatus(status: ClaudeDesignPluginStatu
 
   const hosts = normalizeHostList([
     status.proxy?.host,
+    status.frontendUrl,
+    status.frontendAssetsHost,
+    status.frontendAssetsOrigin,
+    status.proxy?.frontendAssetsHost,
+    status.proxy?.frontendAssetsOrigin,
     ...(Array.isArray(status.proxy?.fallbackHosts) ? status.proxy.fallbackHosts : [])
   ]);
   if (!hosts.length) {

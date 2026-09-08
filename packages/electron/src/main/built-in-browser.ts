@@ -78,10 +78,14 @@ class BuiltInBrowserService {
     this.registerIpcHandlers();
   }
 
-  async open(config: AppConfig): Promise<void> {
+  async open(config: AppConfig, url?: string): Promise<void> {
     await this.syncProxy(config);
 
     const window = this.ensureWindow();
+    const targetUrl = typeof url === "string" ? url.trim() : "";
+    if (targetUrl) {
+      this.navigate(targetUrl);
+    }
     if (window.isMinimized()) {
       window.restore();
     }
@@ -1022,20 +1026,12 @@ function normalizeGatewayBrowserAppHost(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function sanitizeBrowserAppId(value: string): string {
   return value
     .toLowerCase()
     .replace(/[^a-z0-9_.-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 80);
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function isBrowserHomeUrl(value: string): boolean {
