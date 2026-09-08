@@ -1,4 +1,6 @@
 import * as os from "os";
+import * as fs from "fs";
+import * as path from "path";
 
 export const IDE_TYPE = {
   UNSPECIFIED: 0,
@@ -108,13 +110,17 @@ export const MODEL_FALLBACK_MAP: Record<string, string> = {
 };
 
 export const OAUTH_CONFIG = {
-  clientId:
-    "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
-  clientSecret: "YOUR_GOOGLE_OAUTH_CLIENT_SECRET",
+  get clientId(): string {
+    return resolveAntigravityOAuthClientId();
+  },
+  get clientSecret(): string {
+    return resolveAntigravityOAuthClientSecret();
+  },
   authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
   tokenUrl: "https://oauth2.googleapis.com/token",
   userInfoUrl: "https://www.googleapis.com/oauth2/v1/userinfo",
   callbackPort: 51121,
+  callbackFallbackPorts: [51122, 51123, 51124, 51125, 51126],
   scopes: [
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -123,6 +129,62 @@ export const OAUTH_CONFIG = {
     "https://www.googleapis.com/auth/experimentsandconfigs",
   ],
 };
+
+// Google OAuth client credentials are per-user: every operator registers
+// their own OAuth client (Google Cloud console) and keeps the id/secret on
+// their own machine. Resolution order: environment, then the local-only
+// credentials file. Nothing secret is committed to the repo.
+const ANTIGRAVITY_OAUTH_CLIENT_ID_ENV = "CCR_ANTIGRAVITY_CLIENT_ID";
+const ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV = "CCR_ANTIGRAVITY_CLIENT_SECRET";
+const ANTIGRAVITY_OAUTH_CREDENTIALS_FILE = "antigravity-oauth.json";
+
+function readAntigravityOAuthCredentialsFile(): {
+  clientId?: unknown;
+  clientSecret?: unknown;
+} {
+  try {
+    const file = path.join(
+      os.homedir(),
+      ".claude-code-router",
+      ANTIGRAVITY_OAUTH_CREDENTIALS_FILE
+    );
+    const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+    if (parsed && typeof parsed === "object") {
+      return {
+        clientId: (parsed as Record<string, unknown>).clientId,
+        clientSecret: (parsed as Record<string, unknown>).clientSecret,
+      };
+    }
+  } catch {
+    // Missing or unreadable file: fall through to the setup error below.
+  }
+  return {};
+}
+
+function antigravityOAuthSetupError(which: "client ID" | "client secret"): Error {
+  return new Error(
+    `Antigravity OAuth ${which} is not configured. Set ` +
+      `${ANTIGRAVITY_OAUTH_CLIENT_ID_ENV}/${ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV} ` +
+      `or create ~/.claude-code-router/${ANTIGRAVITY_OAUTH_CREDENTIALS_FILE} ` +
+      `with {"clientId": "...", "clientSecret": "..."} from your own Google Cloud OAuth client.`
+  );
+}
+
+export function resolveAntigravityOAuthClientId(): string {
+  const fromEnv = process.env[ANTIGRAVITY_OAUTH_CLIENT_ID_ENV]?.trim();
+  if (fromEnv) return fromEnv;
+  const fromFile = readAntigravityOAuthCredentialsFile().clientId;
+  if (typeof fromFile === "string" && fromFile.trim()) return fromFile.trim();
+  throw antigravityOAuthSetupError("client ID");
+}
+
+export function resolveAntigravityOAuthClientSecret(): string {
+  const fromEnv = process.env[ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV]?.trim();
+  if (fromEnv) return fromEnv;
+  const fromFile = readAntigravityOAuthCredentialsFile().clientSecret;
+  if (typeof fromFile === "string" && fromFile.trim()) return fromFile.trim();
+  throw antigravityOAuthSetupError("client secret");
+}
 export const OAUTH_REDIRECT_URI = "http://localhost:51121/oauth-callback";
 
 export const ANTIGRAVITY_SYSTEM_INSTRUCTION =

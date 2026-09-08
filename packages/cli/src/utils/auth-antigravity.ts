@@ -3,26 +3,12 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { exec } from "child_process";
+import {
+  OAUTH_CONFIG,
+  OAUTH_REDIRECT_URI,
+} from "@ccr/core/transformer/antigravity/constants";
 
 const AUTH_FILE = path.join(os.homedir(), ".claude-code-router", "antigravity-auth.json");
-
-const OAUTH_CONFIG = {
-  clientId: "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
-  clientSecret: "YOUR_GOOGLE_OAUTH_CLIENT_SECRET",
-  authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
-  tokenUrl: "https://oauth2.googleapis.com/token",
-  userInfoUrl: "https://www.googleapis.com/oauth2/v1/userinfo",
-  callbackPort: 51121,
-  callbackFallbackPorts: [51122, 51123, 51124, 51125, 51126],
-  scopes: [
-    "https://www.googleapis.com/auth/cloud-platform",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/cclog",
-    "https://www.googleapis.com/auth/experimentsandconfigs",
-  ],
-};
-const OAUTH_REDIRECT_URI = "http://localhost:51121/oauth-callback";
 
 interface StoredAuth {
   accounts: AuthData[];
