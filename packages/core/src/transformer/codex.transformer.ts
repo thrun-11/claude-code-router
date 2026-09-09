@@ -5,6 +5,24 @@ import * as path from "path";
 import * as fs from "fs/promises";
 import { CookieJar } from "./codex-bypass/cookie-jar";
 import { FingerprintManager } from "./codex-bypass/fingerprint";
+import {
+  AnthropicBlockTracker,
+  AnthropicStopReason,
+  buildAnthropicMessage,
+  contentBlockStopEvent,
+  errorEvent,
+  inputJsonDeltaEvent,
+  messageDeltaEvent,
+  messageStartEvent,
+  messageStopEvent,
+  responsesOutputToContent,
+  signatureDeltaEvent,
+  textDeltaEvent,
+  thinkingDeltaEvent,
+  thinkingBlockStartEvent,
+  textBlockStartEvent,
+  toolUseBlockStartEvent,
+} from "./anthropic-emitter";
 import { httpGet, httpPost, httpPostStream } from "./codex-bypass/http-client";
 import type { HttpResponse } from "./codex-bypass/types";
 import { hasNative } from "./codex-bypass/native";
@@ -44,18 +62,20 @@ export class ResponsesToAnthropicStream {
   private started = false;
   private finished = false;
   private buffer = "";
-  private nextIndex = 0;
-  private openBlocks: number[] = [];
-  private textBlock: number | null = null;
-  private thinkingBlock: number | null = null;
-  private toolByItemId = new Map<string, number>();
-  private toolByOutputIndex = new Map<number, number>();
-  private hasToolUse = false;
+  private blocks = new AnthropicBlockTracker();
   private usage: any = null;
+  private warnedTypes = new Set<string>();
+  private onUnknownEvent?: (type: string) => void;
+  private failedMessage: string;
 
-  constructor(fallbackModel: string) {
+  constructor(
+    fallbackModel: string,
+    options?: { onUnknownEvent?: (type: string) => void; failedMessage?: string },
+  ) {
     this.messageId = `msg_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
     this.model = fallbackModel || "unknown";
+    this.onUnknownEvent = options?.onUnknownEvent;
+    this.failedMessage = options?.failedMessage || "Codex request failed upstream.";
   }
 
   push(chunk: string): string[] {
@@ -72,7 +92,7 @@ export class ResponsesToAnthropicStream {
     return out;
   }
 
-  finish(stopReason = "end_turn"): string[] {
+  finish(stopReason: AnthropicStopReason = "end_turn"): string[] {
     if (this.finished) return [];
     return this.finishStream(stopReason);
   }
@@ -91,6 +111,18 @@ export class ResponsesToAnthropicStream {
       return this.handleEvent(JSON.parse(raw));
     } catch {
       return [];
+    }
+  }
+
+  private reportUnknown(type: unknown): void {
+    if (typeof type !== "string" || !type || this.warnedTypes.has(type)) {
+      return;
+    }
+    this.warnedTypes.add(type);
+    try {
+      this.onUnknownEvent?.(type);
+    } catch {
+      // Reporting must never break conversion.
     }
   }
 
@@ -119,13 +151,7 @@ export class ResponsesToAnthropicStream {
         // If the full arguments arrived without deltas, emit them so the
         // tool_use block is not left with an empty input.
         if (index !== null && item.arguments) {
-          out.push(
-            this.sse("content_block_delta", {
-              type: "content_block_delta",
-              index,
-              delta: { type: "input_json_delta", partial_json: item.arguments },
-            })
-          );
+          out.push(inputJsonDeltaEvent(index, item.arguments));
         }
       } else if (item.type === "reasoning") {
         this.ensureThinkingBlock(out, event.output_index);
@@ -137,30 +163,18 @@ export class ResponsesToAnthropicStream {
 
     if (type === "response.output_text.delta") {
       out.push(...this.ensureStarted());
-      this.ensureTextBlock(out);
-      if (this.textBlock !== null && event.delta) {
-        out.push(
-          this.sse("content_block_delta", {
-            type: "content_block_delta",
-            index: this.textBlock,
-            delta: { type: "text_delta", text: event.delta },
-          })
-        );
+      const { index } = this.ensureTextBlock(out);
+      if (event.delta) {
+        out.push(textDeltaEvent(index, event.delta));
       }
       return out;
     }
 
     if (type === "response.function_call_arguments.delta") {
       out.push(...this.ensureStarted());
-      const index = this.resolveToolBlock(event.item_id, event.output_index);
+      const index = this.blocks.resolveTool(event.item_id, event.output_index);
       if (index !== null && event.delta) {
-        out.push(
-          this.sse("content_block_delta", {
-            type: "content_block_delta",
-            index,
-            delta: { type: "input_json_delta", partial_json: event.delta },
-          })
-        );
+        out.push(inputJsonDeltaEvent(index, event.delta));
       }
       return out;
     }
@@ -173,22 +187,14 @@ export class ResponsesToAnthropicStream {
       event.delta
     ) {
       out.push(...this.ensureStarted());
-      this.ensureThinkingBlock(out, event.output_index);
-      if (this.thinkingBlock !== null) {
-        out.push(
-          this.sse("content_block_delta", {
-            type: "content_block_delta",
-            index: this.thinkingBlock,
-            delta: { type: "thinking_delta", thinking: event.delta },
-          })
-        );
-      }
+      const { index } = this.ensureThinkingBlock(out, event.output_index);
+      out.push(thinkingDeltaEvent(index, event.delta));
       return out;
     }
 
     if (type === "response.completed") {
       this.usage = event.response?.usage || this.usage;
-      return this.finishStream(this.hasToolUse ? "tool_use" : "end_turn");
+      return this.finishStream(this.blocks.hasToolUse ? "tool_use" : "end_turn");
     }
 
     if (type === "response.incomplete") {
@@ -198,18 +204,13 @@ export class ResponsesToAnthropicStream {
     }
 
     if (type === "response.failed") {
-      const message =
-        event.response?.error?.message || "Codex request failed upstream.";
-      out.push(
-        this.sse("error", {
-          type: "error",
-          error: { type: "api_error", message },
-        })
-      );
+      const message = event.response?.error?.message || this.failedMessage;
+      out.push(errorEvent(message));
       this.finished = true;
       return out;
     }
 
+    this.reportUnknown(type);
     return out;
   }
 
@@ -232,139 +233,59 @@ export class ResponsesToAnthropicStream {
   private ensureStarted(): string[] {
     if (this.started) return [];
     this.started = true;
-    return [
-      this.sse("message_start", {
-        type: "message_start",
-        message: {
-          id: this.messageId,
-          type: "message",
-          role: "assistant",
-          content: [],
-          model: this.model,
-          stop_reason: null,
-          stop_sequence: null,
-          usage: { input_tokens: 0, output_tokens: 0 },
-        },
-      }),
-    ];
+    return [messageStartEvent(this.messageId, this.model)];
   }
 
-  private ensureTextBlock(out: string[]): void {
-    if (this.textBlock !== null) return;
-    const index = this.nextIndex++;
-    this.textBlock = index;
-    this.openBlocks.push(index);
-    out.push(
-      this.sse("content_block_start", {
-        type: "content_block_start",
-        index,
-        content_block: { type: "text", text: "" },
-      })
-    );
+  private ensureTextBlock(out: string[]): { index: number } {
+    const { index, started } = this.blocks.openText();
+    if (started) out.push(textBlockStartEvent(index));
+    return { index };
   }
 
-  private ensureThinkingBlock(out: string[], outputIndex?: number): void {
-    if (this.thinkingBlock !== null) {
-      if (typeof outputIndex === "number") {
-        this.toolByOutputIndex.set(outputIndex, this.thinkingBlock);
-      }
-      return;
-    }
-    const index = this.nextIndex++;
-    this.thinkingBlock = index;
-    this.openBlocks.push(index);
-    if (typeof outputIndex === "number") {
-      this.toolByOutputIndex.set(outputIndex, index);
-    }
-    out.push(
-      this.sse("content_block_start", {
-        type: "content_block_start",
-        index,
-        content_block: { type: "thinking", thinking: "" },
-      })
-    );
+  private ensureThinkingBlock(out: string[], outputIndex?: number): { index: number } {
+    const { index, started } = this.blocks.openThinking(outputIndex);
+    if (started) out.push(thinkingBlockStartEvent(index));
+    return { index };
   }
 
   private ensureToolBlock(item: any, outputIndex: number | undefined, out: string[]): number | null {
-    const name = item?.name;
-    if (!name) return this.resolveToolBlock(item?.id || item?.call_id, outputIndex);
-    const id = item.call_id || item.id || `toolu_${Date.now()}`;
-    if (item.id) {
-      const existing = this.toolByItemId.get(item.id);
-      if (existing !== undefined) return existing;
+    const index = this.blocks.openTool(item, outputIndex);
+    if (index === null) return null;
+    // openTool returns an existing index when the block was already opened;
+    // only emit a start event for a freshly allocated block.
+    if (!this.emittedStarts.has(index)) {
+      this.emittedStarts.add(index);
+      out.push(toolUseBlockStartEvent(index, this.blocks.toolIdFor(item), item.name));
     }
-    const index = this.nextIndex++;
-    this.openBlocks.push(index);
-    if (item.id) this.toolByItemId.set(item.id, index);
-    if (typeof outputIndex === "number") this.toolByOutputIndex.set(outputIndex, index);
-    this.hasToolUse = true;
-    out.push(
-      this.sse("content_block_start", {
-        type: "content_block_start",
-        index,
-        content_block: { type: "tool_use", id, name, input: {} },
-      })
-    );
     return index;
   }
 
-  private resolveToolBlock(itemId?: string, outputIndex?: number): number | null {
-    if (itemId && this.toolByItemId.has(itemId)) {
-      return this.toolByItemId.get(itemId)!;
-    }
-    if (typeof outputIndex === "number" && this.toolByOutputIndex.has(outputIndex)) {
-      const mapped = this.toolByOutputIndex.get(outputIndex)!;
-      // Only return tool_use blocks here; text/thinking blocks are tracked
-      // separately and must not receive input_json deltas.
-      if (mapped !== this.textBlock && mapped !== this.thinkingBlock) {
-        return mapped;
-      }
-      return null;
-    }
-    return null;
-  }
+  private emittedStarts = new Set<number>();
 
-  private finishStream(stopReason: string): string[] {
+  private finishStream(stopReason: AnthropicStopReason): string[] {
     if (this.finished) return [];
     this.finished = true;
     const out: string[] = [];
     out.push(...this.ensureStarted());
-    for (const index of this.openBlocks) {
-      if (index === this.thinkingBlock) {
-        out.push(
-          this.sse("content_block_delta", {
-            type: "content_block_delta",
-            index,
-            delta: { type: "signature_delta", signature: String(Date.now()) },
-          })
-        );
+    for (const block of this.blocks.closeAll()) {
+      if (block.thinking) {
+        // closeAll resets tracker state; the snapshot above preserves it.
+        out.push(signatureDeltaEvent(block.index, String(Date.now())));
       }
-      out.push(
-        this.sse("content_block_stop", { type: "content_block_stop", index })
-      );
+      out.push(contentBlockStopEvent(block.index));
     }
-    this.openBlocks = [];
-    this.textBlock = null;
-    this.thinkingBlock = null;
     const usage = this.usage || {};
-    const cachedTokens = usage.input_tokens_details?.cached_tokens || 0;
     out.push(
-      this.sse("message_delta", {
-        type: "message_delta",
-        delta: { stop_reason: stopReason, stop_sequence: null },
-        usage: {
-          input_tokens: usage.input_tokens || 0,
-          output_tokens: usage.output_tokens || 0,
-          ...(cachedTokens ? { cache_read_input_tokens: cachedTokens } : {}),
-        },
+      messageDeltaEvent(stopReason, {
+        input_tokens: usage.input_tokens || 0,
+        output_tokens: usage.output_tokens || 0,
+        ...(usage.input_tokens_details?.cached_tokens
+          ? { cache_read_input_tokens: usage.input_tokens_details.cached_tokens }
+          : {}),
       })
     );
-    out.push(this.sse("message_stop", { type: "message_stop" }));
+    out.push(messageStopEvent());
     return out;
-  }
-
-  private sse(event: string, data: any): string {
-    return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   }
 }
 
@@ -465,7 +386,10 @@ export class CodexTransformer implements Transformer {
     // Convert Codex Responses SSE to Anthropic SSE. The gateway returns our
     // response bytes directly to Claude Code, so raw Codex events would yield
     // zero parseable stream events client-side.
-    const converter = new ResponsesToAnthropicStream(requestBody.model || "unknown");
+    const converter = new ResponsesToAnthropicStream(requestBody.model || "unknown", {
+      onUnknownEvent: (type) =>
+        this.logger?.warn(`[CODEX] Ignoring unknown upstream event type: ${type}`),
+    });
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
         httpPostStream(
@@ -572,75 +496,23 @@ export class CodexTransformer implements Transformer {
   }
 
   private convertResponsesToAnthropic(data: any): any {
-    const content: any[] = [];
-    let hasToolUse = false;
-
-    for (const item of data.output || []) {
-      if (item?.type === "reasoning") {
-        const summary = Array.isArray(item.summary)
-          ? item.summary
-              .map((part: any) =>
-                typeof part === "string" ? part : part?.text || ""
-              )
-              .join("")
-          : "";
-        // Encrypted-only reasoning carries no visible thought; skip it rather
-        // than fabricating content. Visible summaries become thinking blocks.
-        if (summary) {
-          content.push({
-            type: "thinking",
-            thinking: summary,
-            signature: String(Date.now()),
-          });
-        }
-        continue;
-      }
-
-      if (item?.type === "message" && Array.isArray(item.content)) {
-        for (const part of item.content) {
-          if (part?.type === "output_text" && part.text) {
-            content.push({ type: "text", text: part.text });
-          }
-        }
-        continue;
-      }
-
-      if (item?.type === "function_call") {
-        let input: any = {};
-        try {
-          input = JSON.parse(item.arguments || "{}");
-        } catch {
-          input = {};
-        }
-        content.push({
-          type: "tool_use",
-          id: item.call_id || item.id || `toolu_${Date.now()}`,
-          name: item.name,
-          input,
-        });
-        hasToolUse = true;
-      }
-    }
-
+    const { content, hasToolUse } = responsesOutputToContent(data.output);
     const usage = data.usage || {};
-    return {
-      id: data.id || `msg_${Date.now()}`,
-      type: "message",
-      role: "assistant",
-      model: data.model || "unknown",
-      content: content.length > 0 ? content : [{ type: "text", text: "" }],
-      stop_reason:
+    return buildAnthropicMessage({
+      id: data.id,
+      model: data.model,
+      content,
+      stopReason:
         data.status === "incomplete"
           ? "max_tokens"
           : hasToolUse
             ? "tool_use"
             : "end_turn",
-      stop_sequence: null,
       usage: {
         input_tokens: usage.input_tokens || 0,
         output_tokens: usage.output_tokens || 0,
       },
-    };
+    });
   }
 
   private convertSseToResponsesPayload(ssePayload: string, fallbackModel: string): any {
@@ -918,6 +790,10 @@ export class CodexTransformer implements Transformer {
     if (message.role === "assistant") {
       const items: any[] = [];
 
+      // Deliberately one-way: echoed `thinking` blocks are dropped here.
+      // The signatures we emit are gateway-issued timestamps, not model
+      // reasoning — sending them back as model thought would fabricate
+      // history. Text and tool calls round-trip; thought does not.
       const text = this.extractText(message.content);
       if (text !== null) {
         items.push({

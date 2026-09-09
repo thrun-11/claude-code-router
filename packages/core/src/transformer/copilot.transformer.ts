@@ -11,10 +11,12 @@ import {
 } from "@ccr/core/services/copilot/token";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import {
+  loadCopilotModelCatalog,
+  selectCopilotEndpoint,
+} from "@ccr/core/services/copilot/model-catalog";
 
 const TOKEN_PATH = join(process.env.HOME!, ".claude-code-router", "copilot-token.json");
-
-const GITHUB_MODELS = ["gpt-", "o1", "o3", "o4", "deepseek"];
 
 export class CopilotTransformer implements Transformer {
   name = "copilot";
@@ -79,8 +81,14 @@ export class CopilotTransformer implements Transformer {
       ["assistant", "tool"].includes(msg.role)
     );
 
-    // Determine if this is a GPT or Claude model
-    const isGPTModel = this.isGPTModel(request.model);
+    // Determine endpoint from the live model catalog when available:
+    // some models only serve /responses, others only /chat/completions.
+    // Falls back to the name heuristic when the catalog is unreachable.
+    const catalog = await loadCopilotModelCatalog(
+      tokenData.copilotToken,
+      this.accountType,
+    );
+    const route = selectCopilotEndpoint(request.model, catalog);
 
     // Keep tools from request body if an earlier transformer did not forward them.
     const originalBody = context.req?.body as any;
@@ -101,13 +109,16 @@ export class CopilotTransformer implements Transformer {
       "X-Initiator": isAgentCall ? "agent" : "user",
     };
 
-    // Transform based on model type
-    const body = isGPTModel
-      ? this.buildGPTRequest(requestWithTools, headers)
-      : this.buildClaudeRequest(requestWithTools, headers);
+    // Transform based on the resolved endpoint
+    const body =
+      route === "/chat/completions"
+        ? this.buildChatRequest(requestWithTools)
+        : route === "/v1/responses"
+          ? this.buildGPTRequest(requestWithTools, headers)
+          : this.buildClaudeRequest(requestWithTools, headers);
 
     // Determine endpoint
-    const endpoint = isGPTModel ? "/v1/responses" : "/v1/messages";
+    const endpoint = route;
 
     return {
       body,
@@ -119,12 +130,86 @@ export class CopilotTransformer implements Transformer {
   }
 
   /**
-   * Check if model is a GPT-style model
+   * Build request for chat-only models using OpenAI chat completions.
+   * Upstream answers in OpenAI format, which the endpoint transformer
+   * converts to Anthropic downstream.
    */
-  private isGPTModel(model: string): boolean {
-    if (!model) return true;
-    const lower = model.toLowerCase();
-    return GITHUB_MODELS.some((prefix: string) => lower.startsWith(prefix));
+  private buildChatRequest(request: UnifiedChatRequest): any {
+    const messages: any[] = [];
+    for (const msg of request.messages) {
+      if (msg.role === "system") {
+        const text =
+          typeof msg.content === "string" ? msg.content : (this.extractText(msg.content) ?? "");
+        if (text) messages.push({ role: "system", content: text });
+        continue;
+      }
+
+      if (msg.role === "assistant") {
+        const text =
+          typeof msg.content === "string" ? msg.content : this.extractText(msg.content);
+        const entry: any = { role: "assistant", content: text ?? null };
+        if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+          entry.tool_calls = msg.tool_calls
+            .filter((tc) => tc?.function?.name)
+            .map((tc) => ({
+              id: tc.id,
+              type: "function",
+              function: {
+                name: tc.function.name,
+                arguments:
+                  typeof tc.function.arguments === "string"
+                    ? tc.function.arguments
+                    : JSON.stringify(tc.function.arguments ?? {}),
+              },
+            }));
+        }
+        messages.push(entry);
+        continue;
+      }
+
+      if (msg.role === "tool") {
+        messages.push({
+          role: "tool",
+          tool_call_id: msg.tool_call_id,
+          content: this.getStringContent(msg.content),
+        });
+        continue;
+      }
+
+      if (typeof msg.content === "string") {
+        messages.push({ role: "user", content: msg.content });
+      } else if (Array.isArray(msg.content)) {
+        messages.push({
+          role: "user",
+          content: msg.content.map((part: any) =>
+            part?.type === "image_url" && part.image_url?.url
+              ? { type: "image_url", image_url: { url: part.image_url.url } }
+              : { type: "text", text: part?.text ?? "" },
+          ),
+        });
+      } else {
+        messages.push({ role: "user", content: "" });
+      }
+    }
+
+    const body: any = { model: request.model, messages, stream: request.stream };
+    if (request.temperature !== undefined) body.temperature = request.temperature;
+    if ((request as any).top_p !== undefined) body.top_p = (request as any).top_p;
+    if (request.max_tokens !== undefined) body.max_tokens = request.max_tokens;
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      const chatTools = request.tools
+        .map((tool: any) => ({
+          type: "function",
+          function: {
+            name: tool.function?.name || tool.name,
+            description: tool.function?.description || tool.description || "",
+            parameters: tool.function?.parameters || tool.input_schema || { type: "object" },
+          },
+        }))
+        .filter((tool) => tool.function.name);
+      if (chatTools.length > 0) body.tools = chatTools;
+    }
+    return body;
   }
 
   /**

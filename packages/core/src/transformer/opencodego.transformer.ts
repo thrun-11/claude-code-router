@@ -1,7 +1,27 @@
 import { UnifiedChatRequest, LLMProvider } from "@ccr/core/types/llm";
 import { Transformer, TransformerContext } from "@ccr/core/types/transformer";
 import { ResponsesToAnthropicStream } from "@ccr/core/transformer/codex.transformer";
+import {
+  buildAnthropicMessage,
+  contentBlockStopEvent,
+  inputJsonDeltaEvent,
+  messageDeltaEvent,
+  messageStartEvent,
+  messageStopEvent,
+  responsesOutputToContent,
+  signatureDeltaEvent,
+  sseEvent,
+  textBlockStartEvent,
+  textDeltaEvent,
+  thinkingBlockStartEvent,
+  thinkingDeltaEvent,
+  toolUseBlockStartEvent,
+} from "@ccr/core/transformer/anthropic-emitter";
 import { ProxyAgent } from "undici";
+import {
+  isOpencodeChatCompletionsModel,
+  isOpencodeFreeModel,
+} from "@ccr/core/transformer/model-capabilities";
 
 const CHAT_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions";
 const FREE_CHAT_ENDPOINT = "https://opencode.ai/zen/v1/chat/completions";
@@ -13,19 +33,11 @@ export class OpencodeGoTransformer implements Transformer {
   logger?: any;
 
   private isChatCompletionsModel(model: string): boolean {
-    return (
-      model.startsWith("deepseek-") ||
-      model.startsWith("kimi-") ||
-      model.startsWith("glm-") ||
-      model.startsWith("mimo-") ||
-      model.startsWith("qwen-") ||
-      model.startsWith("minimax-")
-    );
+    return isOpencodeChatCompletionsModel(model);
   }
 
   private isFreeModel(model: string): boolean {
-    const normalized = model.trim().toLowerCase();
-    return normalized === "big-pickle" || normalized.endsWith("-free");
+    return isOpencodeFreeModel(model);
   }
 
   private chatEndpointForModel(model: string): string {
@@ -190,7 +202,10 @@ export class OpencodeGoTransformer implements Transformer {
         // response conversion), so passing raw response.* events through
         // yields zero parseable stream events client-side — the same failure
         // mode the Codex transformer had.
-        const converter = new ResponsesToAnthropicStream(body.model || "unknown");
+        const converter = new ResponsesToAnthropicStream(body.model || "unknown", {
+          onUnknownEvent: (type) =>
+            this.logger?.warn?.(`[opencode-go] Ignoring unknown upstream event type: ${type}`),
+        });
         const convertedStream = this.convertResponsesStreamToAnthropic(
           response.body,
           converter,
@@ -205,7 +220,9 @@ export class OpencodeGoTransformer implements Transformer {
           },
         });
       }
-      const convertedStream = this.convertOpenAIStreamToAnthropic(response.body, context);
+      const convertedStream = this.convertOpenAIStreamToAnthropic(response.body, context, (type) =>
+        this.logger?.warn?.(`[opencode-go] Ignoring unknown upstream delta shape: ${type}`),
+      );
       return new Response(convertedStream, {
         status: response.status,
         statusText: response.statusText,
@@ -336,6 +353,9 @@ export class OpencodeGoTransformer implements Transformer {
       }
       if (msg.role === "assistant") {
         const items: any[] = [];
+        // Deliberately one-way: echoed array content (e.g. `thinking`
+        // blocks with gateway-issued signatures) is dropped rather than
+        // sent back as model thought. Text and tool calls round-trip.
         if (typeof msg.content === "string" && msg.content) {
           items.push({ role: "assistant", content: [{ type: "output_text", text: msg.content }] });
         }
@@ -394,52 +414,23 @@ export class OpencodeGoTransformer implements Transformer {
   }
 
   private convertResponsesToAnthropic(data: any): any {
-    const output = data.output || [];
-    const content: any[] = [];
-    for (const item of output) {
-      if (item.type === "reasoning") {
-        content.push({
-          type: "thinking",
-          thinking: item.encrypted_content ? "" : item.summary?.map((s: any) => s.text).join("") || "",
-          signature: Date.now().toString(),
-        });
-      } else if (item.type === "message" && Array.isArray(item.content)) {
-        for (const part of item.content) {
-          if (part.type === "output_text" && part.text) {
-            content.push({ type: "text", text: part.text });
-          }
-        }
-      } else if (item.type === "function_call") {
-        let input: any = {};
-        try {
-          input = JSON.parse(item.arguments || "{}");
-        } catch {}
-        content.push({
-          type: "tool_use",
-          id: item.call_id || item.id,
-          name: item.name,
-          input,
-        });
-      }
-    }
+    const { content, hasToolUse } = responsesOutputToContent(data.output);
     // fallback to direct output_text if no structured output
     if (content.length === 0 && data.output_text) {
       content.push({ type: "text", text: data.output_text });
     }
-    return {
-      id: data.id || `msg_${Date.now()}`,
-      type: "message",
-      role: "assistant",
-      model: data.model || "unknown",
+    const usage = data.usage || {};
+    return buildAnthropicMessage({
+      id: data.id,
+      model: data.model,
       content,
-      stop_reason: "end_turn",
-      stop_sequence: null,
+      stopReason: hasToolUse ? "tool_use" : "end_turn",
       usage: {
-        input_tokens: data.usage?.input_tokens || data.usage?.prompt_tokens || 0,
-        output_tokens: data.usage?.output_tokens || data.usage?.completion_tokens || 0,
-        cache_read_input_tokens: data.usage?.input_tokens_details?.cached_tokens || 0,
+        input_tokens: usage.input_tokens ?? usage.prompt_tokens ?? 0,
+        output_tokens: usage.output_tokens ?? usage.completion_tokens ?? 0,
+        cache_read_input_tokens: usage.input_tokens_details?.cached_tokens || 0,
       },
-    };
+    });
   }
 
   private convertResponsesStreamToAnthropic(
@@ -506,10 +497,21 @@ export class OpencodeGoTransformer implements Transformer {
   private convertOpenAIStreamToAnthropic(
     stream: ReadableStream<Uint8Array>,
     _context: TransformerContext,
+    onUnknownEvent?: (type: string) => void,
   ): ReadableStream {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
+    const warnedTypes = new Set<string>();
+    const reportUnknown = (type: string) => {
+      if (!type || warnedTypes.has(type)) return;
+      warnedTypes.add(type);
+      try {
+        onUnknownEvent?.(type);
+      } catch {
+        // Reporting must never break conversion.
+      }
+    };
 
     return new ReadableStream({
       async start(controller) {
@@ -542,18 +544,13 @@ export class OpencodeGoTransformer implements Transformer {
           }
         };
 
-        const sendEvent = (event: string, data: any) => {
-          safeEnqueue(
-            encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-          );
+        const sendLine = (line: string) => {
+          safeEnqueue(encoder.encode(line));
         };
 
         const closePrimaryBlock = () => {
           if (primaryBlockIndex >= 0) {
-            sendEvent("content_block_stop", {
-              type: "content_block_stop",
-              index: primaryBlockIndex,
-            });
+            sendLine(contentBlockStopEvent(primaryBlockIndex));
             primaryBlockIndex = -1;
             primaryBlockType = null;
           }
@@ -561,10 +558,7 @@ export class OpencodeGoTransformer implements Transformer {
 
         const closeAllToolCallBlocks = () => {
           for (const [, blockIdx] of toolCallBlocks) {
-            sendEvent("content_block_stop", {
-              type: "content_block_stop",
-              index: blockIdx,
-            });
+            sendLine(contentBlockStopEvent(blockIdx));
           }
           toolCallBlocks.clear();
         };
@@ -581,19 +575,7 @@ export class OpencodeGoTransformer implements Transformer {
         };
 
         const sendMessageStart = () => {
-          sendEvent("message_start", {
-            type: "message_start",
-            message: {
-              id: messageId,
-              type: "message",
-              role: "assistant",
-              content: [],
-              model,
-              stop_reason: null,
-              stop_sequence: null,
-              usage: { input_tokens: 0, output_tokens: 0 },
-            },
-          });
+          sendLine(messageStartEvent(messageId, model));
           hasStarted = true;
         };
 
@@ -602,14 +584,7 @@ export class OpencodeGoTransformer implements Transformer {
           isFinished = true;
 
           if (primaryBlockType === "thinking") {
-            sendEvent("content_block_delta", {
-              type: "content_block_delta",
-              index: primaryBlockIndex,
-              delta: {
-                type: "signature_delta",
-                signature: Date.now().toString(),
-              },
-            });
+            sendLine(signatureDeltaEvent(primaryBlockIndex, Date.now().toString()));
           }
 
           closeAllBlocks();
@@ -626,19 +601,17 @@ export class OpencodeGoTransformer implements Transformer {
           };
           const anthropicStop = stopReasonMap[stopReason] || "end_turn";
 
-          sendEvent("message_delta", {
-            type: "message_delta",
-            delta: { stop_reason: anthropicStop, stop_sequence: null },
-            usage: {
+          sendLine(
+            messageDeltaEvent(anthropicStop as "end_turn", {
               input_tokens:
                 (usageData?.prompt_tokens || 0) -
                 (usageData?.prompt_tokens_details?.cached_tokens || 0),
               output_tokens: usageData?.completion_tokens || 0,
               cache_read_input_tokens:
                 usageData?.prompt_tokens_details?.cached_tokens || 0,
-            },
-          });
-          sendEvent("message_stop", { type: "message_stop" });
+            })
+          );
+          sendLine(messageStopEvent());
 
           try {
             controller.close();
@@ -669,13 +642,16 @@ export class OpencodeGoTransformer implements Transformer {
               try {
                 const chunk = JSON.parse(rawData);
                 if (chunk.error) {
-                  sendEvent("error", {
-                    type: "error",
-                    message: {
-                      type: "api_error",
-                      message: JSON.stringify(chunk.error),
-                    },
-                  });
+                  // Preserve this converter's error shape (message, not error key).
+                  sendLine(
+                    sseEvent("error", {
+                      type: "error",
+                      message: {
+                        type: "api_error",
+                        message: JSON.stringify(chunk.error),
+                      },
+                    })
+                  );
                   continue;
                 }
 
@@ -688,77 +664,54 @@ export class OpencodeGoTransformer implements Transformer {
                 const delta = choice.delta || {};
                 const finishReason = choice.finish_reason;
 
+                if (
+                  !delta.reasoning_content &&
+                  !delta.content &&
+                  !delta.tool_calls &&
+                  !finishReason &&
+                  Object.keys(delta).length > 0
+                ) {
+                  reportUnknown(`choice-delta:${Object.keys(delta).sort().join(",")}`);
+                }
+
                 if (delta.reasoning_content) {
                   if (!hasStarted) sendMessageStart();
 
                   if (primaryBlockType !== "thinking") {
                     closePrimaryBlock();
                     const idx = allocBlockIndex();
-                    sendEvent("content_block_start", {
-                      type: "content_block_start",
-                      index: idx,
-                      content_block: { type: "thinking", thinking: "" },
-                    });
+                    sendLine(thinkingBlockStartEvent(idx));
                     primaryBlockIndex = idx;
                     primaryBlockType = "thinking";
                   }
 
-                  sendEvent("content_block_delta", {
-                    type: "content_block_delta",
-                    index: primaryBlockIndex,
-                    delta: {
-                      type: "thinking_delta",
-                      thinking: delta.reasoning_content,
-                    },
-                  });
+                  sendLine(thinkingDeltaEvent(primaryBlockIndex, delta.reasoning_content));
                 }
 
                 if (delta.content) {
                   if (!hasStarted) sendMessageStart();
 
                   if (primaryBlockType === "thinking") {
-                    sendEvent("content_block_delta", {
-                      type: "content_block_delta",
-                      index: primaryBlockIndex,
-                      delta: {
-                        type: "signature_delta",
-                        signature: Date.now().toString(),
-                      },
-                    });
+                    sendLine(signatureDeltaEvent(primaryBlockIndex, Date.now().toString()));
                     closePrimaryBlock();
                   }
 
                   if (primaryBlockType !== "text") {
                     closePrimaryBlock();
                     const idx = allocBlockIndex();
-                    sendEvent("content_block_start", {
-                      type: "content_block_start",
-                      index: idx,
-                      content_block: { type: "text", text: "" },
-                    });
+                    sendLine(textBlockStartEvent(idx));
                     primaryBlockIndex = idx;
                     primaryBlockType = "text";
                   }
 
-                  sendEvent("content_block_delta", {
-                    type: "content_block_delta",
-                    index: primaryBlockIndex,
-                    delta: { type: "text_delta", text: delta.content },
-                  });
+                  sendLine(textDeltaEvent(primaryBlockIndex, delta.content));
                 }
 
                 if (delta.tool_calls) {
                   if (!hasStarted) sendMessageStart();
 
                   if (primaryBlockType === "thinking") {
-                    sendEvent("content_block_delta", {
-                      type: "content_block_delta",
-                      index: primaryBlockIndex,
-                      delta: {
-                        type: "signature_delta",
-                        signature: Date.now().toString(),
-                      },
-                    });
+                    sendLine(signatureDeltaEvent(primaryBlockIndex, Date.now().toString()));
                     closePrimaryBlock();
                   }
 
@@ -767,30 +720,14 @@ export class OpencodeGoTransformer implements Transformer {
 
                     if (!toolCallBlocks.has(tcIndex) && tc.id && tc.function?.name) {
                       const idx = allocBlockIndex();
-                      sendEvent("content_block_start", {
-                        type: "content_block_start",
-                        index: idx,
-                        content_block: {
-                          type: "tool_use",
-                          id: tc.id,
-                          name: tc.function.name,
-                          input: {},
-                        },
-                      });
+                      sendLine(toolUseBlockStartEvent(idx, tc.id, tc.function.name));
                       toolCallBlocks.set(tcIndex, idx);
                     }
 
                     if (tc.function?.arguments) {
                       const blockIdx = toolCallBlocks.get(tcIndex);
                       if (blockIdx !== undefined) {
-                        sendEvent("content_block_delta", {
-                          type: "content_block_delta",
-                          index: blockIdx,
-                          delta: {
-                            type: "input_json_delta",
-                            partial_json: tc.function.arguments,
-                          },
-                        });
+                        sendLine(inputJsonDeltaEvent(blockIdx, tc.function.arguments));
                       }
                     }
                   }
