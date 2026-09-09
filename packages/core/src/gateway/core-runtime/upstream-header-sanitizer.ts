@@ -1,3 +1,4 @@
+import { applyMetaTokenFloor } from "@ccr/core/gateway/core-runtime/meta-token-floor";
 import { applyResponsesSessionAffinity } from "@ccr/core/gateway/core-runtime/responses-session-affinity";
 import type { ResponsesSessionAffinityInput } from "@ccr/core/gateway/core-runtime/responses-session-affinity";
 import { applyResponsesToolStrictness } from "@ccr/core/gateway/core-runtime/responses-tool-strictness";
@@ -194,11 +195,11 @@ export function createGatewayPlugin() {
       transformRequest(input: ProviderPluginRequestInput) {
         return {
           ok: true as const,
-          value: {
+          value: applyMetaTokenFloor({
             ...input.upstreamRequest,
             headers: mergeUpstreamProviderHeaders(input.request?.headers, input.upstreamRequest.headers),
             url: rewriteUpstreamProviderUrl(input.upstreamRequest.url, input.targetProviderConfig, input.config)
-          }
+          })
         };
       }
     }, {
