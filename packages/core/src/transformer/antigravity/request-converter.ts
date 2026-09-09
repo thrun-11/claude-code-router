@@ -150,6 +150,10 @@ export function convertAnthropicToGoogle(
     googleRequest.generationConfig.stopSequences = stop_sequences;
   }
 
+  if (isGeminiModel && !modelName.includes("3.1") && !modelName.includes("2.5") && googleRequest.generationConfig.maxOutputTokens > GEMINI_MAX_OUTPUT_TOKENS) {
+    googleRequest.generationConfig.maxOutputTokens = GEMINI_MAX_OUTPUT_TOKENS;
+  }
+
   if (isThinking) {
     if (isClaudeModel) {
       const thinkingBudget = thinking?.budget_tokens || 32000;
@@ -163,9 +167,17 @@ export function convertAnthropicToGoogle(
         googleRequest.generationConfig.maxOutputTokens = thinkingBudget + 8192;
       }
     } else if (isGeminiModel) {
+      let thinkingBudget = clampGeminiThinkingBudget(modelName, thinking?.budget_tokens);
+      const maxOutputTokens = googleRequest.generationConfig.maxOutputTokens;
+      if (typeof maxOutputTokens === "number" && maxOutputTokens > 0) {
+        // Thinking tokens count against maxOutputTokens: without headroom
+        // the model burns the whole budget thinking and the answer
+        // truncates mid-stream (only a fresh-budget "resume" continues it).
+        thinkingBudget = Math.min(thinkingBudget, Math.max(1024, maxOutputTokens - 4096));
+      }
       googleRequest.generationConfig.thinkingConfig = {
         includeThoughts: true,
-        thinkingBudget: clampGeminiThinkingBudget(modelName, thinking?.budget_tokens),
+        thinkingBudget,
       };
     }
   }
@@ -211,10 +223,6 @@ export function convertAnthropicToGoogle(
         };
       }
     }
-  }
-
-  if (isGeminiModel && !modelName.includes("3.1") && !modelName.includes("2.5") && googleRequest.generationConfig.maxOutputTokens > GEMINI_MAX_OUTPUT_TOKENS) {
-    googleRequest.generationConfig.maxOutputTokens = GEMINI_MAX_OUTPUT_TOKENS;
   }
 
   return googleRequest;

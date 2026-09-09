@@ -147,7 +147,8 @@ export function clampGeminiThinkingBudget(
   budget?: number
 ): number {
   const maxBudget = 24576;
-  const defaultBudget = 32000;
+  // Default respects the ceiling above: a default must never exceed max.
+  const defaultBudget = 24576;
   if (budget !== undefined) {
     return Math.min(budget, maxBudget);
   }
