@@ -64,7 +64,44 @@ case "$model_lc" in
       fi
     fi
     ag_frac=""
-    # Preferred: true depletion from the local IDE language server
+    # Preferred: agy CLI weekly buckets (no IDE needed, family-aware).
+    # `agy -p /usage` prints: "Gemini Models<TAB>Weekly Limit Remaining<TAB>1%<TAB>reset..."
+    # and "Claude and GPT models<...>100%<...>". 7s+ per call, so cache with
+    # TTL and refresh in background; never block the render on it.
+    ag_agy_cache="/tmp/antigravity-agy-usage"
+    ag_agy_ttl=300
+    ag_agy_lines=""
+    if [ -f "$ag_agy_cache" ]; then
+      ay_mt=$(stat -f %m "$ag_agy_cache" 2>/dev/null || stat -c %Y "$ag_agy_cache" 2>/dev/null)
+      ay_age=$((now-ay_mt))
+      if [ "$ay_age" -lt "$ag_agy_ttl" ]; then
+        ag_agy_lines=$(cat "$ag_agy_cache" 2>/dev/null)
+      else
+        ag_agy_lines=$(cat "$ag_agy_cache" 2>/dev/null)
+        ag_bin=$(command -v agy 2>/dev/null)
+        [ -z "$ag_bin" ] && ag_bin="$HOME/.local/bin/agy"
+        if [ -x "$ag_bin" ] && ! pgrep -f "agy -p /usage" >/dev/null 2>&1; then
+          ("$ag_bin" -p "/usage" > "$ag_agy_cache.tmp" 2>/dev/null && grep -q "Weekly Limit Remaining" "$ag_agy_cache.tmp" 2>/dev/null && mv "$ag_agy_cache.tmp" "$ag_agy_cache") &
+        fi
+      fi
+    else
+      ag_bin=$(command -v agy 2>/dev/null)
+      [ -z "$ag_bin" ] && ag_bin="$HOME/.local/bin/agy"
+      if [ -x "$ag_bin" ] && ! pgrep -f "agy -p /usage" >/dev/null 2>&1; then
+        ("$ag_bin" -p "/usage" > "$ag_agy_cache.tmp" 2>/dev/null && grep -q "Weekly Limit Remaining" "$ag_agy_cache.tmp" 2>/dev/null && mv "$ag_agy_cache.tmp" "$ag_agy_cache") &
+      fi
+    fi
+    if [ -n "$ag_agy_lines" ]; then
+      case "$model_lc" in
+        *claude*) ag_bucket_pat="^Claude" ;;
+        *) ag_bucket_pat="^Gemini" ;;
+      esac
+      ag_bpct=$(printf '%s' "$ag_agy_lines" | grep -i "$ag_bucket_pat" | head -n 1 | awk -F'\t' '{print $3}' | tr -d '% ' 2>/dev/null)
+      if [ -n "$ag_bpct" ] && [ "$ag_bpct" != "null" ]; then
+        ag_frac=$(awk -v p="$ag_bpct" 'BEGIN{printf "%.4f", p/100}')
+      fi
+    fi
+    # Fallback: true depletion from the local IDE language server
     # (planStatus available vs monthly prompt credits). The per-model
     # remainingFraction below stays pinned at 1.0 on unlimited-style
     # plans, so it cannot show real usage. Discovery (pid -> ports ->
