@@ -156,6 +156,20 @@ case "$model_lc" in
       if [ "${ag_pct:-0}" -lt 10 ]; then ac=31; elif [ "${ag_pct:-0}" -lt 30 ]; then ac=33; else ac=32; fi
       ag_bar_c=$(printf '\033[%sm%s\033[0m' "$ac" "$ag_bar")
       anti_info=$(printf ' | anti::%s %s%%' "$ag_bar_c" "$ag_pct")
+      # Burn-rate alert: track remaining% over time; warn on fast drops.
+      burn_info=""
+      burn_hist="/tmp/antigravity-usage-history"
+      printf '%s %s\n' "$now" "$ag_pct" >> "$burn_hist" 2>/dev/null
+      awk -v cutoff=$((now - 6*3600)) '$1 >= cutoff' "$burn_hist" 2>/dev/null > "$burn_hist.tmp" 2>/dev/null && mv "$burn_hist.tmp" "$burn_hist" 2>/dev/null
+      burn_old=$(awk 'NR==1{print $2}' "$burn_hist" 2>/dev/null)
+      burn_old_t=$(awk 'NR==1{print $1}' "$burn_hist" 2>/dev/null)
+      if [ -n "$burn_old" ] && [ -n "$burn_old_t" ] && [ "$now" -gt "$burn_old_t" ]; then
+        burn_rate=$(awk -v o="$burn_old" -v n="$ag_pct" -v dt=$((now-burn_old_t)) 'BEGIN{if (dt > 900) printf "%.0f", (o-n)*3600/dt}')
+        if [ -n "$burn_rate" ] && [ "$burn_rate" -ge 15 ]; then
+          burn_info=$(printf ' | \033[31m▼%s%%/h\033[0m' "$burn_rate")
+        fi
+      fi
+      anti_info="${anti_info}${burn_info}"
     fi
     ;;
 esac

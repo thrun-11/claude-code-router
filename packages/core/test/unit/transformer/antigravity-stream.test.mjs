@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { streamSSEResponse } from "@ccr/core/transformer/antigravity/sse-parser.ts";
+import {
+  accumulateSSEToResponse,
+  streamSSEResponse,
+} from "@ccr/core/transformer/antigravity/sse-parser.ts";
 
 function stubResponse(frames) {
   const text = frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join("");
@@ -81,6 +84,19 @@ test("functionCall parts become tool_use with tool_use stop", async () => {
     events.find((e) => e.type === "message_delta").delta.stop_reason,
     "tool_use",
   );
+});
+
+test("accumulated non-stream usage attributes input/output/cache tokens", async () => {
+  const frame =
+    'data: {"response":{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"cachedContentTokenCount":10}}}\n\n';
+  const resp = await accumulateSSEToResponse(new Response(frame), "m");
+  const body = await resp.json();
+  assert.deepEqual(body.usage, {
+    input_tokens: 90,
+    output_tokens: 20,
+    cache_read_input_tokens: 10,
+    cache_creation_input_tokens: 0,
+  });
 });
 
 test("empty stream yields an error event, unknown parts warn once", async () => {

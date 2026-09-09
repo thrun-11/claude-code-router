@@ -383,13 +383,13 @@ export async function accumulateSSEToResponse(response: Response, model: string)
         {
           content: { parts },
           finishReason: stopReason?.toUpperCase() || "STOP",
-          usageMetadata: {
-            promptTokenCount: inputTokens,
-            candidatesTokenCount: outputTokens,
-            cachedContentTokenCount: cacheReadTokens,
-          },
         },
       ],
+      usageMetadata: {
+        promptTokenCount: inputTokens,
+        candidatesTokenCount: outputTokens,
+        cachedContentTokenCount: cacheReadTokens,
+      },
     },
   };
 

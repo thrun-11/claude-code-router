@@ -2,6 +2,7 @@ import { Transformer, TransformerContext } from "@ccr/core/types/transformer";
 import { LLMProvider, UnifiedChatRequest } from "@ccr/core/types/llm";
 import { convertAnthropicToGoogle } from "./request-converter";
 import { resolveTieredModel } from "./constants";
+import { refreshAgyBucketCacheInBackground } from "./quota-snapshot";
 import { CloudCodeClient } from "./cloudcode-client";
 import { AuthManager } from "./auth-manager";
 import { sseToResponse } from "./sse-parser";
@@ -41,6 +42,14 @@ export class AntigravityTransformer implements Transformer {
     };
   }> {
     this._logger?.debug({ model: request.model }, "[Antigravity] transformRequestIn");
+
+    // Keep the weekly-bucket cache fresh for the quota-guard route script
+    // and the statusline bar. Fire-and-forget: never blocks the request.
+    try {
+      refreshAgyBucketCacheInBackground(this._logger);
+    } catch {
+      // Quota freshness is best-effort.
+    }
 
     await this.authManager.initialize();
 
