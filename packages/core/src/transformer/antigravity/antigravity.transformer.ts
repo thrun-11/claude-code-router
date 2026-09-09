@@ -112,7 +112,11 @@ export class AntigravityTransformer implements Transformer {
       if (!response.body) {
         throw new Error("Stream response body is null");
       }
-      return sseToResponse(response, model);
+      const logger = this._logger;
+      return sseToResponse(response, model, {
+        onUnknownPart: (shape) =>
+          logger?.warn?.(`[Antigravity] Ignoring unknown upstream part shape: ${shape}`),
+      });
     }
 
     return response;

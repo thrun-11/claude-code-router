@@ -3,8 +3,15 @@ import { MIN_SIGNATURE_LENGTH } from "./constants";
 const signatureCache = new Map<string, { sig: string; ts: number }>();
 const GEMINI_SIGNATURE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 
-export function cacheThinkingSignature(sig: string, _modelFamily: string): void {
-  signatureCache.set(sig, { sig, ts: Date.now() });
+/**
+ * Caches a real upstream thought signature keyed by the thinking text it
+ * belongs to, so `restoreThinkingSignatures` can reattach it when the
+ * client echoes the block back on the next turn. Keyed by text (not by
+ * signature) because lookup happens from the echoed thinking content.
+ */
+export function cacheThinkingSignature(sig: string, thinkingText: string): void {
+  if (!sig || !thinkingText) return;
+  signatureCache.set(thinkingText, { sig, ts: Date.now() });
 }
 
 export function getCachedSignature(key: string): string | null {
@@ -133,22 +140,6 @@ export function restoreThinkingSignatures(parts: any[]): any[] {
     }
     return p;
   });
-}
-
-export function removeTrailingThinkingBlocks(parts: any[]): any[] {
-  if (!Array.isArray(parts)) return parts;
-  const lastIndex = parts.length - 1;
-  for (let i = lastIndex; i >= 0; i--) {
-    const p = parts[i];
-    if (p.type === "thinking" || p.thought === true) {
-      if (i === lastIndex) {
-        continue;
-      }
-      break;
-    }
-    break;
-  }
-  return parts;
 }
 
 export function clampGeminiThinkingBudget(

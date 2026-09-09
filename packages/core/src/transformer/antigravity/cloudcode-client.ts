@@ -203,7 +203,10 @@ export class CloudCodeClient {
                 return;
               }
 
-              const eventGenerator = streamSSEResponse(response, model);
+              const eventGenerator = streamSSEResponse(response, model, {
+                onUnknownPart: (shape) =>
+                  logger?.warn?.(`[CloudCode] Ignoring unknown upstream part shape: ${shape}`),
+              });
               for await (const event of eventGenerator) {
                 const sseLine = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
                 controller.enqueue(encoder.encode(sseLine));

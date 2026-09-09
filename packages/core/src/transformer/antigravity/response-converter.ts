@@ -1,4 +1,4 @@
-import { MIN_SIGNATURE_LENGTH, getModelFamily } from "./constants";
+import { MIN_SIGNATURE_LENGTH } from "./constants";
 import { cacheThinkingSignature } from "./thinking-utils";
 
 export interface AnthropicResponse {
@@ -35,8 +35,7 @@ export function convertGoogleToAnthropic(
       if (part.thought === true) {
         const signature = part.thoughtSignature || "";
         if (signature && signature.length >= MIN_SIGNATURE_LENGTH) {
-          const modelFamily = getModelFamily(model);
-          cacheThinkingSignature(signature, modelFamily);
+          cacheThinkingSignature(signature, part.text);
         }
         anthropicContent.push({
           type: "thinking",
@@ -96,13 +95,16 @@ export function convertGoogleToAnthropic(
   }
 
   const finishReason = firstCandidate.finishReason;
+  // Tool calls win over STOP: Gemini reports finishReason STOP even when
+  // the turn produced functionCall parts, and the client only runs tools
+  // when stop_reason is tool_use.
   let stopReason = "end_turn";
-  if (finishReason === "STOP") {
-    stopReason = "end_turn";
+  if (hasToolCalls) {
+    stopReason = "tool_use";
   } else if (finishReason === "MAX_TOKENS") {
     stopReason = "max_tokens";
-  } else if (finishReason === "TOOL_USE" || hasToolCalls) {
-    stopReason = "tool_use";
+  } else if (finishReason === "STOP") {
+    stopReason = "end_turn";
   }
 
   const usageMetadata = response.usageMetadata || {};

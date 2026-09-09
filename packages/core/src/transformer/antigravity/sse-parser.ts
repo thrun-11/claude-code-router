@@ -1,4 +1,6 @@
+import { MIN_SIGNATURE_LENGTH } from "./constants";
 import { convertGoogleToAnthropic } from "./response-converter";
+import { cacheThinkingSignature } from "./thinking-utils";
 
 export interface SSEEvent {
   type: string;
@@ -7,11 +9,17 @@ export interface SSEEvent {
   message?: any;
   content_block?: any;
   usage?: any;
+  error?: any;
+}
+
+export interface StreamResponseOptions {
+  onUnknownPart?: (info: string) => void;
 }
 
 export async function* streamSSEResponse(
   response: Response,
-  model: string
+  model: string,
+  options?: StreamResponseOptions,
 ): AsyncGenerator<SSEEvent, void, unknown> {
   const reader = response.body?.getReader();
   if (!reader) return;
@@ -24,22 +32,40 @@ export async function* streamSSEResponse(
   let blockIndex = 0;
   let currentBlockType: "thinking" | "text" | "tool_use" | "image" | null = null;
   let currentThinkingSignature = "";
+  let currentThinkingText = "";
+  const warnedShapes = new Set<string>();
 
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheReadTokens = 0;
   let stopReason: string | null = null;
 
+  const reportUnknownPart = (part: any): void => {
+    const shape = Object.keys(part || {}).sort().join(",");
+    if (!shape || warnedShapes.has(shape)) return;
+    warnedShapes.add(shape);
+    try {
+      options?.onUnknownPart?.(shape);
+    } catch {
+      // Reporting must never break conversion.
+    }
+  };
+
   const flushSignature = (): SSEEvent | null => {
     if (currentThinkingSignature) {
+      if (currentThinkingText) {
+        cacheThinkingSignature(currentThinkingSignature, currentThinkingText);
+      }
       const ev: SSEEvent = {
         type: "content_block_delta",
         index: blockIndex,
         delta: { type: "signature_delta", signature: currentThinkingSignature },
       };
       currentThinkingSignature = "";
+      currentThinkingText = "";
       return ev;
     }
+    currentThinkingText = "";
     return null;
   };
 
@@ -109,12 +135,16 @@ export async function* streamSSEResponse(
             const signature = (part as any).thoughtSignature || "";
 
             if (currentBlockType !== "thinking") {
-              const closeEv = closeBlock();
-              if (closeEv) yield closeEv;
+              // Signature first: it belongs to the thinking block being
+              // closed (same index); emitting after closeBlock would
+              // misindex it onto the next block.
               const sigEv = flushSignature();
               if (sigEv) yield sigEv;
+              const closeEv = closeBlock();
+              if (closeEv) yield closeEv;
               currentBlockType = "thinking";
               currentThinkingSignature = "";
+              currentThinkingText = "";
               yield {
                 type: "content_block_start",
                 index: blockIndex,
@@ -122,11 +152,12 @@ export async function* streamSSEResponse(
               };
             }
 
-            if (signature && signature.length >= 50) {
+            if (signature && signature.length >= MIN_SIGNATURE_LENGTH) {
               currentThinkingSignature = signature;
             }
 
             if (text) {
+              currentThinkingText += text;
               yield {
                 type: "content_block_delta",
                 index: blockIndex,
@@ -137,10 +168,10 @@ export async function* streamSSEResponse(
             const text = (part as any).text;
 
             if (currentBlockType !== "text") {
-              const closeEv = closeBlock();
-              if (closeEv) yield closeEv;
               const sigEv = flushSignature();
               if (sigEv) yield sigEv;
+              const closeEv = closeBlock();
+              if (closeEv) yield closeEv;
               currentBlockType = "text";
               yield {
                 type: "content_block_start",
@@ -158,10 +189,10 @@ export async function* streamSSEResponse(
             const fc = (part as any).functionCall;
 
             if (currentBlockType !== null) {
-              const closeEv = closeBlock();
-              if (closeEv) yield closeEv;
               const sigEv = flushSignature();
               if (sigEv) yield sigEv;
+              const closeEv = closeBlock();
+              if (closeEv) yield closeEv;
             }
 
             currentBlockType = "tool_use";
@@ -192,10 +223,10 @@ export async function* streamSSEResponse(
             const img = (part as any).inlineData;
 
             if (currentBlockType !== null) {
-              const closeEv = closeBlock();
-              if (closeEv) yield closeEv;
               const sigEv = flushSignature();
               if (sigEv) yield sigEv;
+              const closeEv = closeBlock();
+              if (closeEv) yield closeEv;
             }
 
             yield {
@@ -213,6 +244,8 @@ export async function* streamSSEResponse(
             yield { type: "content_block_stop", index: blockIndex };
             blockIndex++;
             currentBlockType = null;
+          } else {
+            reportUnknownPart(part);
           }
         }
 
@@ -230,57 +263,26 @@ export async function* streamSSEResponse(
   }
 
   if (!hasEmittedStart) {
-    const messageId2 = `msg_${Date.now().toString(16)}${Math.random().toString(16).slice(2, 18)}`;
     yield {
-      type: "message_start",
-      message: {
-        id: messageId2,
-        type: "message",
-        role: "assistant",
-        content: [],
-        model,
-        stop_reason: null,
-        stop_sequence: null,
-        usage: {
-          input_tokens: 0,
-          output_tokens: 0,
-          cache_read_input_tokens: 0,
-          cache_creation_input_tokens: 0,
-        },
+      type: "error",
+      error: {
+        type: "api_error",
+        message: "Antigravity returned no usable events for this request.",
       },
     };
-    yield {
-      type: "content_block_start",
-      index: 0,
-      content_block: { type: "text", text: "" },
-    };
-    yield {
-      type: "content_block_delta",
-      index: 0,
-      delta: {
-        type: "text_delta",
-        text: "[No response - please try again]",
-      },
-    };
-    yield { type: "content_block_stop", index: 0 };
-    yield {
-      type: "message_delta",
-      delta: { stop_reason: "end_turn", stop_sequence: null },
-      usage: { output_tokens: 0 },
-    };
-    yield { type: "message_stop" };
     return;
   }
 
-  const closeEv = closeBlock();
-  if (closeEv) yield closeEv;
   const sigEv = flushSignature();
   if (sigEv) yield sigEv;
+  const closeEv = closeBlock();
+  if (closeEv) yield closeEv;
 
   yield {
     type: "message_delta",
     delta: { stop_reason: stopReason || "end_turn", stop_sequence: null },
     usage: {
+      input_tokens: inputTokens - cacheReadTokens,
       output_tokens: outputTokens,
       cache_read_input_tokens: cacheReadTokens,
       cache_creation_input_tokens: 0,
@@ -400,13 +402,14 @@ export async function accumulateSSEToResponse(response: Response, model: string)
 
 export function sseToResponse(
   response: Response,
-  model: string
+  model: string,
+  options?: StreamResponseOptions,
 ): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        for await (const event of streamSSEResponse(response, model)) {
+        for await (const event of streamSSEResponse(response, model, options)) {
           const eventLine = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
           controller.enqueue(encoder.encode(eventLine));
         }

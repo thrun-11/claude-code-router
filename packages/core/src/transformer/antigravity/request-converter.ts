@@ -19,7 +19,6 @@ import {
   filterUnsignedThinkingBlocks,
   reorderAssistantContent,
   restoreThinkingSignatures,
-  removeTrailingThinkingBlocks,
   clampGeminiThinkingBudget,
 } from "./thinking-utils";
 
@@ -112,7 +111,6 @@ export function convertAnthropicToGoogle(
       Array.isArray(msgContent)
     ) {
       msgContent = restoreThinkingSignatures(msgContent);
-      msgContent = removeTrailingThinkingBlocks(msgContent);
       msgContent = reorderAssistantContent(msgContent);
     }
 
