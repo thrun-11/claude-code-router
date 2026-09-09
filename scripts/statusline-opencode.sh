@@ -63,7 +63,43 @@ case "$model_lc" in
         if echo "$ag_resp" | jq -e '.models' >/dev/null 2>&1; then echo "$ag_resp" > "$ag_cache" 2>/dev/null; ag_js="$ag_resp"; else [ -f "$ag_cache" ] && ag_js=$(cat "$ag_cache" 2>/dev/null); fi
       fi
     fi
-    if [ -n "$ag_js" ]; then
+    ag_frac=""
+    # Preferred: true depletion from the local IDE language server
+    # (planStatus available vs monthly prompt credits). The per-model
+    # remainingFraction below stays pinned at 1.0 on unlimited-style
+    # plans, so it cannot show real usage. Discovery (pid -> ports ->
+    # csrf token) runs at most once per TTL; cached value is reused.
+    ag_credits_cache="/tmp/antigravity-credits.json"
+    ag_credits_ttl=120
+    ag_credits_json=""
+    if [ -f "$ag_credits_cache" ]; then
+      cx_mt=$(stat -f %m "$ag_credits_cache" 2>/dev/null || stat -c %Y "$ag_credits_cache" 2>/dev/null)
+      cx_age=$((now-cx_mt))
+      [ "$cx_age" -lt "$ag_credits_ttl" ] && ag_credits_json=$(cat "$ag_credits_cache" 2>/dev/null)
+    fi
+    if [ -z "$ag_credits_json" ]; then
+      for ag_pid in $(pgrep -f "language_server_macos_arm" 2>/dev/null); do
+        ag_tok=$(ps -p "$ag_pid" -o args= 2>/dev/null | grep -o '\-\-csrf_token [a-f0-9-]*' | awk '{print $2}' | head -n 1)
+        [ -z "$ag_tok" ] && continue
+        for ag_port in $(lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null | awk -v pid="$ag_pid" '$2==pid {print $9}' | grep -o '[0-9]*$' | sort -u); do
+          ag_status=$(curl -sk --max-time 3 -X POST "https://127.0.0.1:$ag_port/exa.language_server_pb.LanguageServerService/GetUserStatus" -H "Content-Type: application/json" -H "Connect-Protocol-Version: 1" -H "X-Codeium-Csrf-Token: $ag_tok" -d '{"metadata":{"ideName":"antigravity","extensionName":"antigravity","locale":"en"}}' 2>/dev/null)
+          ag_avail=$(printf '%s' "$ag_status" | jq -r '.userStatus.planStatus.availablePromptCredits // empty' 2>/dev/null)
+          ag_monthly=$(printf '%s' "$ag_status" | jq -r '.userStatus.planStatus.planInfo.monthlyPromptCredits // empty' 2>/dev/null)
+          if [ -n "$ag_avail" ] && [ -n "$ag_monthly" ] && [ "$ag_avail" != "null" ] && [ "$ag_monthly" != "null" ] && [ "$ag_monthly" != "0" ]; then
+            ag_credits_json=$(printf '{"available":%s,"monthly":%s}' "$ag_avail" "$ag_monthly")
+            printf '%s' "$ag_credits_json" > "$ag_credits_cache" 2>/dev/null
+            break 2
+          fi
+        done
+      done
+    fi
+    if [ -n "$ag_credits_json" ]; then
+      ag_cpct=$(printf '%s' "$ag_credits_json" | jq -r '.available as $a | .monthly as $m | if ($m | type) == "number" and $m > 0 and (($a | type) == "number") then (($a/$m)*100) else empty end' 2>/dev/null)
+      if [ -n "$ag_cpct" ] && [ "$ag_cpct" != "null" ]; then
+        ag_frac=$(awk -v p="$ag_cpct" 'BEGIN{printf "%.4f", p/100}')
+      fi
+    fi
+    if [ -z "$ag_frac" ] && [ -n "$ag_js" ]; then
       ag_src="$model"
       case "$(printf '%s' "$model_id" | tr '[:upper:]' '[:lower:]')" in *antigravity*) ag_src="$model_id";; esac
       ag_slug=$(printf '%s' "$ag_src" | sed 's|.*/||' | sed 's/\[.*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]' | sed 's/ (.*//' | sed 's/[ _]/-/g')
@@ -74,15 +110,15 @@ case "$model_lc" in
           [ -n "$ag_frac" ] && [ "$ag_frac" != "null" ] && break 2
         done
       done
-      if [ -n "$ag_frac" ] && [ "$ag_frac" != "null" ]; then
-        ag_pct=$(awk -v f="$ag_frac" 'BEGIN{printf "%.0f", f*100}')
-        ag_fill=$(awk -v f="$ag_frac" 'BEGIN{printf "%d", (f*10+0.5)}')
-        [ "$ag_fill" -gt 10 ] && ag_fill=10; [ "$ag_fill" -lt 0 ] && ag_fill=0
-        ag_bar=""; i=1; while [ $i -le 10 ]; do if [ $i -le $ag_fill ]; then ag_bar="${ag_bar}█"; else ag_bar="${ag_bar}░"; fi; i=$((i+1)); done
-        if [ "${ag_pct:-0}" -lt 10 ]; then ac=31; elif [ "${ag_pct:-0}" -lt 30 ]; then ac=33; else ac=32; fi
-        ag_bar_c=$(printf '\033[%sm%s\033[0m' "$ac" "$ag_bar")
-        anti_info=$(printf ' | anti::%s %s%%' "$ag_bar_c" "$ag_pct")
-      fi
+    fi
+    if [ -n "$ag_frac" ] && [ "$ag_frac" != "null" ]; then
+      ag_pct=$(awk -v f="$ag_frac" 'BEGIN{printf "%.0f", f*100}')
+      ag_fill=$(awk -v f="$ag_frac" 'BEGIN{printf "%d", (f*10+0.5)}')
+      [ "$ag_fill" -gt 10 ] && ag_fill=10; [ "$ag_fill" -lt 0 ] && ag_fill=0
+      ag_bar=""; i=1; while [ $i -le 10 ]; do if [ $i -le $ag_fill ]; then ag_bar="${ag_bar}█"; else ag_bar="${ag_bar}░"; fi; i=$((i+1)); done
+      if [ "${ag_pct:-0}" -lt 10 ]; then ac=31; elif [ "${ag_pct:-0}" -lt 30 ]; then ac=33; else ac=32; fi
+      ag_bar_c=$(printf '\033[%sm%s\033[0m' "$ac" "$ag_bar")
+      anti_info=$(printf ' | anti::%s %s%%' "$ag_bar_c" "$ag_pct")
     fi
     ;;
 esac
