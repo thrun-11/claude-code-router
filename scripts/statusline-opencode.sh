@@ -66,7 +66,7 @@ case "$model_lc" in
     if [ -n "$ag_js" ]; then
       ag_src="$model"
       case "$(printf '%s' "$model_id" | tr '[:upper:]' '[:lower:]')" in *antigravity*) ag_src="$model_id";; esac
-      ag_slug=$(printf '%s' "$ag_src" | sed 's|.*/||' | sed 's/\[.*//' | tr '[:upper:]' '[:lower:]' | sed 's/ (.*//' | sed 's/[ _]/-/g')
+      ag_slug=$(printf '%s' "$ag_src" | sed 's|.*/||' | sed 's/\[.*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]' | sed 's/ (.*//' | sed 's/[ _]/-/g')
       ag_frac=""
       for cand in "$ag_slug" "$(printf '%s' "$ag_slug" | tr '.' '-')" "$(printf '%s' "$ag_slug" | sed 's/-preview$//')" "$(printf '%s' "$ag_slug" | tr '.' '-' | sed 's/-preview$//')"; do
         for c2 in "$cand" "$(printf '%s' "$cand" | sed -E 's/-(high|medium|low)$/-tiered/')"; do
