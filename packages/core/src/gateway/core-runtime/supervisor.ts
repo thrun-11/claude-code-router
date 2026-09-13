@@ -22,7 +22,10 @@ import type { CoreGatewayHealth, ManagedGatewayRuntimeMarker } from "@ccr/core/g
 import { delay } from "@ccr/core/gateway/internal/clock";
 
 const gatewayRuntimeStateKey = "gateway";
-const gatewayConfigAcceptanceTimeoutMs = 5_000;
+// The config-acceptance budget spans child spawn, the gateway module
+// require(), and the IPC round-trip through the parent event loop, so a
+// loaded host legitimately needs well more than the old hardcoded 5s.
+const defaultGatewayConfigAcceptanceTimeoutMs = 30_000;
 const gatewayStartupTimeoutMs = 15_000;
 const gatewayChildOutputLimit = 4000;
 const privateDirMode = 0o700;
@@ -93,6 +96,19 @@ export function spawnGatewayProcess(
   };
 }
 
+// CCR_GATEWAY_CONFIG_TIMEOUT_MS tunes the startup budget above for hosts
+// whose process spawn / module load times exceed the default under load.
+export function gatewayConfigAcceptanceTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CCR_GATEWAY_CONFIG_TIMEOUT_MS?.trim();
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed >= 1_000) {
+      return Math.trunc(parsed);
+    }
+  }
+  return defaultGatewayConfigAcceptanceTimeoutMs;
+}
+
 function monitorGatewayConfigAcceptance(child: ChildProcess): {
   promise: Promise<void>;
   reject: (error: Error) => void;
@@ -129,9 +145,10 @@ function monitorGatewayConfigAcceptance(child: ChildProcess): {
     const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
       finish(new Error(formatCoreGatewayChildExit(child, code, signal, "before accepting runtime config")));
     };
+    const acceptanceTimeoutMs = gatewayConfigAcceptanceTimeoutMs();
     const timer = setTimeout(() => {
-      finish(new Error(`Core gateway did not accept runtime config within ${gatewayConfigAcceptanceTimeoutMs}ms.`));
-    }, gatewayConfigAcceptanceTimeoutMs);
+      finish(new Error(`Core gateway did not accept runtime config within ${acceptanceTimeoutMs}ms. Set CCR_GATEWAY_CONFIG_TIMEOUT_MS to raise this limit.`));
+    }, acceptanceTimeoutMs);
     rejectAcceptance = (error) => finish(error);
     child.on("message", onMessage);
     child.once("error", onError);
