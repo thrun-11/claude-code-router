@@ -94,6 +94,8 @@ export function convertGoogleToAnthropic(
     }
   }
 
+  appendGroundingCitations(firstCandidate, anthropicContent);
+
   const finishReason = firstCandidate.finishReason;
   // Tool calls win over STOP: Gemini reports finishReason STOP even when
   // the turn produced functionCall parts, and the client only runs tools
@@ -130,4 +132,58 @@ export function convertGoogleToAnthropic(
 
 function randomId(): string {
   return Math.random().toString(36).slice(2, 18) + Math.random().toString(36).slice(2, 18);
+}
+
+/**
+ * Translates Gemini grounding metadata into Anthropic citation blocks.
+ * `webSearchQueries` become server_tool_use blocks (one per query);
+ * `groundingChunks[].web` become a single aggregated web_search_tool_result
+ * (deduplicated by URL). Emits nothing when there is no grounding data, and
+ * never flips stop_reason (server tools execute provider-side).
+ */
+export function appendGroundingCitations(candidate: any, anthropicContent: any[]): void {
+  const grounding = candidate?.groundingMetadata;
+  if (!grounding || typeof grounding !== "object") return;
+  const queries: string[] = [];
+  const seenQueries = new Set<string>();
+  for (const query of Array.isArray(grounding.webSearchQueries) ? grounding.webSearchQueries : []) {
+    if (typeof query !== "string" || !query.trim() || seenQueries.has(query)) continue;
+    seenQueries.add(query);
+    queries.push(query);
+  }
+  const seen = new Set<string>();
+  const sources: Array<{ title: string; url: string }> = [];
+  for (const chunk of Array.isArray(grounding.groundingChunks) ? grounding.groundingChunks : []) {
+    const web = chunk?.web;
+    if (!web || typeof web.uri !== "string" || !web.uri) continue;
+    if (seen.has(web.uri)) continue;
+    seen.add(web.uri);
+    sources.push({
+      title: typeof web.title === "string" && web.title ? web.title : web.uri,
+      url: web.uri,
+    });
+  }
+  if (queries.length === 0 && sources.length === 0) return;
+  const useIds: string[] = [];
+  for (const query of queries) {
+    const id = `srvtoolu_grounding_${randomId()}`;
+    useIds.push(id);
+    anthropicContent.push({
+      type: "server_tool_use",
+      id,
+      name: "web_search",
+      input: { query },
+    });
+  }
+  if (sources.length > 0) {
+    anthropicContent.push({
+      type: "web_search_tool_result",
+      tool_use_id: useIds[0] ?? `srvtoolu_${Date.now()}`,
+      content: sources.map((source) => ({
+        type: "web_search_result",
+        title: source.title,
+        url: source.url,
+      })),
+    });
+  }
 }

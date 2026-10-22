@@ -65,7 +65,12 @@ export interface UnifiedMessage {
 }
 
 // 统一的工具定义接口
-export interface UnifiedTool {
+// Function tools carry full schemas. Server-side tools (Anthropic
+// `web_search_*`, `code_execution_*`, `computer_*`, MCP-style entries, ...)
+// have no function schema — they execute provider-side. They must be
+// preserved with their original type instead of being flattened into a
+// function shape (which produces malformed entries that upstreams reject).
+export interface UnifiedFunctionTool {
   type: "function";
   function: {
     name: string;
@@ -79,6 +84,14 @@ export interface UnifiedTool {
     };
   };
 }
+
+export interface UnifiedServerTool {
+  type: string;
+  name?: string;
+  [key: string]: any;
+}
+
+export type UnifiedTool = UnifiedFunctionTool | UnifiedServerTool;
 
 export type ThinkLevel = "none" | "low" | "medium" | "high";
 

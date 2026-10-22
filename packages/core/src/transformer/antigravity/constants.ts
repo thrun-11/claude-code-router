@@ -62,7 +62,13 @@ export const ANTIGRAVITY_HEADERS = {
 export const DEFAULT_PROJECT_ID = "rising-fact-p41fc";
 export const DEFAULT_PORT = 8080;
 
-export const GEMINI_MAX_OUTPUT_TOKENS = 16384;
+// Output cap for newer Gemini models, matching the official agy CLI
+// (MITM-verified 2026-10-14, agy 1.3.5 sends maxOutputTokens 65536 with
+// thinkingBudget -1). Previously 16384 as a guard against fixed thinking
+// budgets burning the output window (see 41ceff3d); with the dynamic -1
+// default below, the backend manages thinking spend itself, so the CLI
+// pairing is safe to mirror.
+export const GEMINI_MAX_OUTPUT_TOKENS = 65536;
 export const MIN_SIGNATURE_LENGTH = 50;
 export const GEMINI_SKIP_SIGNATURE = "skip_thought_signature_validator";
 

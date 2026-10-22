@@ -160,7 +160,62 @@ export function buildAnthropicMessage(input: {
 export type ResponsesContentItem =
   | { type: "text"; text: string }
   | { type: "thinking"; thinking: string; signature: string }
-  | { type: "tool_use"; id: string; name: string; input: unknown };
+  | { type: "tool_use"; id: string; name: string; input: unknown }
+  | { type: "server_tool_use"; id: string; name: string; input: unknown }
+  | {
+      type: "web_search_tool_result";
+      tool_use_id: string;
+      content: Array<{ type: "web_search_result"; title: string; url: string }>;
+    };
+
+export type ResponsesSearchCall = { id: string; query: string };
+export type ResponsesSearchCitation = { url: string; title: string };
+
+function extractSearchQuery(item: any): string | undefined {
+  const action = item?.action;
+  if (item?.type !== "web_search_call" || action?.type !== "search") return undefined;
+  const query = typeof action.query === "string" ? action.query.trim() : "";
+  return query || undefined;
+}
+
+/**
+ * Collects provider-executed web searches and their cited sources from a
+ * completed Responses `output` array. `open_page` sub-steps carry no query
+ * and are skipped; citations dedupe by URL so repeated spans collapse.
+ */
+export function collectSearchResults(output: unknown): {
+  searches: ResponsesSearchCall[];
+  citations: ResponsesSearchCitation[];
+} {
+  const searches: ResponsesSearchCall[] = [];
+  const seenSearches = new Set<string>();
+  const citations: ResponsesSearchCitation[] = [];
+  const seenCitations = new Set<string>();
+  for (const item of (output as any[]) || []) {
+    if (item?.type === "web_search_call" && typeof item.id === "string") {
+      const query = extractSearchQuery(item);
+      if (query && !seenSearches.has(item.id)) {
+        seenSearches.add(item.id);
+        searches.push({ id: item.id, query });
+      }
+      continue;
+    }
+    if (item?.type === "message" && Array.isArray(item.content)) {
+      for (const part of item.content) {
+        for (const annotation of part?.annotations || []) {
+          if (annotation?.type !== "url_citation" || typeof annotation.url !== "string") continue;
+          const url = annotation.url;
+          const title = typeof annotation.title === "string" ? annotation.title : url;
+          const key = `${url}\n${title}`;
+          if (seenCitations.has(key)) continue;
+          seenCitations.add(key);
+          citations.push({ url, title });
+        }
+      }
+    }
+  }
+  return { searches, citations };
+}
 
 /**
  * Maps OpenAI-style Responses `output` items to Anthropic content blocks.
@@ -229,6 +284,28 @@ export function responsesOutputToContent(
     }
   }
 
+  // Provider-executed searches surface here; text already flowed above.
+  const { searches, citations } = collectSearchResults(output);
+  for (const search of searches) {
+    content.push({
+      type: "server_tool_use",
+      id: search.id,
+      name: "web_search",
+      input: { query: search.query },
+    });
+  }
+  if (citations.length > 0) {
+    content.push({
+      type: "web_search_tool_result",
+      tool_use_id: searches[0]?.id ?? `srvtoolu_${Date.now()}`,
+      content: citations.map((citation) => ({
+        type: "web_search_result" as const,
+        title: citation.title,
+        url: citation.url,
+      })),
+    });
+  }
+
   return { content, hasToolUse };
 }
 
@@ -245,6 +322,7 @@ export class AnthropicBlockTracker {
   private toolByItemId = new Map<string, number>();
   private toolByOutputIndex = new Map<number, number>();
   private outputIndexBlock = new Map<number, number>();
+  private streamedToolArgs = new Set<number>();
   hasToolUse = false;
 
   openText(outputIndex?: number): { index: number; started: boolean } {
@@ -297,6 +375,14 @@ export class AnthropicBlockTracker {
     return item.call_id || item.id || `toolu_${Date.now()}`;
   }
 
+  markToolArgsStreamed(index: number): void {
+    this.streamedToolArgs.add(index);
+  }
+
+  hasStreamedToolArgs(index: number): boolean {
+    return this.streamedToolArgs.has(index);
+  }
+
   resolveTool(itemId?: string, outputIndex?: number): number | null {
     if (itemId && this.toolByItemId.has(itemId)) {
       return this.toolByItemId.get(itemId)!;
@@ -312,6 +398,17 @@ export class AnthropicBlockTracker {
 
   isThinkingBlock(index: number): boolean {
     return index === this.thinkingBlock;
+  }
+
+  /**
+   * Allocates fresh indices for end-of-turn synthesized blocks (e.g.
+   * citation blocks flushed at response completion). Allocated blocks join
+   * the open set so `closeAll` still closes them.
+   */
+  allocExtra(count: number): number[] {
+    const indices: number[] = [];
+    for (let i = 0; i < count; i++) indices.push(this.alloc());
+    return indices;
   }
 
   closeAll(): Array<{ index: number; thinking: boolean }> {

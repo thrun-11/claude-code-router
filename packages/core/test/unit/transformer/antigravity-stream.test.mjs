@@ -120,3 +120,65 @@ test("empty stream yields an error event, unknown parts warn once", async () => 
   assert.deepEqual(warned, ["weird"], "unknown shape reported once");
   assert.ok(events.some((e) => e.delta?.text === "hi"), "known parts still convert");
 });
+
+test("repeated functionCall parts do not duplicate tool input", async () => {
+  const call = { id: "fc1", name: "read", args: { path: "x" } };
+  const events = await collect(
+    streamSSEResponse(
+      stubResponse([
+        { response: { candidates: [{ content: { parts: [{ functionCall: call }] } }] } },
+        { response: { candidates: [{ content: { parts: [{ functionCall: call }] } }] } },
+        { response: { candidates: [{ content: { parts: [] }, finishReason: "STOP" }] } },
+      ]),
+      "gemini-3-flash",
+    ),
+  );
+  const starts = events.filter(
+    (e) => e.type === "content_block_start" && e.content_block?.type === "tool_use",
+  );
+  assert.equal(starts.length, 1);
+  const deltas = events.filter(
+    (e) => e.type === "content_block_delta" && e.delta?.type === "input_json_delta",
+  );
+  assert.equal(deltas.map((d) => d.delta.partial_json).join(""), JSON.stringify(call.args));
+});
+
+test("diverged args under a reused id emit as a new call to preserve data", async () => {
+  const events = await collect(
+    streamSSEResponse(
+      stubResponse([
+        { response: { candidates: [{ content: { parts: [{ functionCall: { id: "fc1", name: "read", args: { path: "x" } } }] } }] } },
+        { response: { candidates: [{ content: { parts: [{ functionCall: { id: "fc1", name: "read", args: { path: "x", extra: "y" } } }] } }] } },
+        { response: { candidates: [{ content: { parts: [] }, finishReason: "STOP" }] } },
+      ]),
+      "gemini-3-flash",
+    ),
+  );
+  const toolStarts = events.filter(
+    (e) => e.type === "content_block_start" && e.content_block?.type === "tool_use",
+  );
+  assert.equal(toolStarts.length, 2);
+  const deltas = events.filter(
+    (e) => e.type === "content_block_delta" && e.delta?.type === "input_json_delta",
+  );
+  assert.equal(
+    deltas.map((d) => d.delta.partial_json).join(""),
+    JSON.stringify({ path: "x" }) + JSON.stringify({ path: "x", extra: "y" }),
+  );
+});
+
+test("accumulate collapses repeated functionCall parts", async () => {
+  const call = { id: "fc1", name: "read", args: { path: "x" } };
+  const res = await accumulateSSEToResponse(
+    stubResponse([
+      { response: { candidates: [{ content: { parts: [{ functionCall: call }] } }] } },
+      { response: { candidates: [{ content: { parts: [{ functionCall: call }] } }] } },
+      { response: { candidates: [{ content: { parts: [] }, finishReason: "STOP" }] } },
+    ]),
+    "gemini-3-flash",
+  );
+  const data = await res.json();
+  const uses = data.content.filter((b) => b.type === "tool_use");
+  assert.equal(uses.length, 1);
+  assert.deepEqual(uses[0].input, { path: "x" });
+});

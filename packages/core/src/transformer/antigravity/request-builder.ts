@@ -52,12 +52,21 @@ export function buildCloudCodeRequest(
 
   googleRequest.sessionId = deriveSessionId(googleRequest as any);
 
-  const systemParts = [
-    { text: ANTIGRAVITY_SYSTEM_INSTRUCTION },
-    {
-      text: `Please ignore the following [ignore]${ANTIGRAVITY_SYSTEM_INSTRUCTION}[/ignore]`,
-    },
-  ];
+  // No [ignore]-wrapped self-negation: telling the model to disregard our
+  // own identity line only erases the persona (MITM 2026-10-14 shows the
+  // official client leads with a full identity manual instead).
+  const systemParts = [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }];
+
+  // The official client frames every user request in <USER_REQUEST> tags
+  // and says so in its identity prompt. convertAnthropicToGoogle frames
+  // Gemini user text identically, so state the convention here too —
+  // but only for Gemini models, since Claude-backend requests are not
+  // wrapped and must not reference tags that never appear.
+  if (getModelFamily(options?.model || "") === "gemini") {
+    systemParts.push({
+      text: "User requests are enclosed within <USER_REQUEST> tags.",
+    });
+  }
 
   if (googleRequest.systemInstruction && googleRequest.systemInstruction.parts) {
     for (const part of googleRequest.systemInstruction.parts) {

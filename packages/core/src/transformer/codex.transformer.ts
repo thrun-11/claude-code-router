@@ -9,6 +9,7 @@ import {
   AnthropicBlockTracker,
   AnthropicStopReason,
   buildAnthropicMessage,
+  contentBlockStartEvent,
   contentBlockStopEvent,
   errorEvent,
   inputJsonDeltaEvent,
@@ -24,6 +25,7 @@ import {
   toolUseBlockStartEvent,
 } from "./anthropic-emitter";
 import { httpGet, httpPost, httpPostStream } from "./codex-bypass/http-client";
+import { mapResponsesTools } from "./server-tools";
 import type { HttpResponse } from "./codex-bypass/types";
 import { hasNative } from "./codex-bypass/native";
 
@@ -67,6 +69,10 @@ export class ResponsesToAnthropicStream {
   private warnedTypes = new Set<string>();
   private onUnknownEvent?: (type: string) => void;
   private failedMessage: string;
+  private pendingSearches: Array<{ callId: string; query: string }> = [];
+  private seenSearchIds = new Set<string>();
+  private pendingCitations: Array<{ url: string; title: string }> = [];
+  private seenCitations = new Set<string>();
 
   constructor(
     fallbackModel: string,
@@ -139,6 +145,7 @@ export class ResponsesToAnthropicStream {
 
     if (type === "response.output_item.added") {
       out.push(...this.ensureStarted());
+      this.recordSearchCall(event.item);
       this.openItemBlock(event.item, event.output_index, out);
       return out;
     }
@@ -146,11 +153,15 @@ export class ResponsesToAnthropicStream {
     if (type === "response.output_item.done") {
       out.push(...this.ensureStarted());
       const item = event.item || {};
+      this.recordSearchCall(item);
+      this.recordMessageAnnotations(item);
       if (item.type === "function_call") {
         const index = this.ensureToolBlock(item, event.output_index, out);
         // If the full arguments arrived without deltas, emit them so the
-        // tool_use block is not left with an empty input.
-        if (index !== null && item.arguments) {
+        // tool_use block is not left with an empty input. When deltas were
+        // already streamed (muse-spark sends both), emitting the full
+        // snapshot again would duplicate the JSON downstream.
+        if (index !== null && item.arguments && !this.blocks.hasStreamedToolArgs(index)) {
           out.push(inputJsonDeltaEvent(index, item.arguments));
         }
       } else if (item.type === "reasoning") {
@@ -175,6 +186,7 @@ export class ResponsesToAnthropicStream {
       const index = this.blocks.resolveTool(event.item_id, event.output_index);
       if (index !== null && event.delta) {
         out.push(inputJsonDeltaEvent(index, event.delta));
+        this.blocks.markToolArgsStreamed(index);
       }
       return out;
     }
@@ -194,13 +206,16 @@ export class ResponsesToAnthropicStream {
 
     if (type === "response.completed") {
       this.usage = event.response?.usage || this.usage;
-      return this.finishStream(this.blocks.hasToolUse ? "tool_use" : "end_turn");
+      return [...this.flushSearchCitations(), ...this.finishStream(this.blocks.hasToolUse ? "tool_use" : "end_turn")];
     }
 
     if (type === "response.incomplete") {
       this.usage = event.response?.usage || this.usage;
       const reason = event.response?.incomplete_details?.reason;
-      return this.finishStream(reason === "max_output_tokens" ? "max_tokens" : "end_turn");
+      return [
+        ...this.flushSearchCitations(),
+        ...this.finishStream(reason === "max_output_tokens" ? "max_tokens" : "end_turn"),
+      ];
     }
 
     if (type === "response.failed") {
@@ -210,7 +225,82 @@ export class ResponsesToAnthropicStream {
       return out;
     }
 
+    if (type === "response.output_text.annotation.added") {
+      this.recordCitation(event.annotation);
+      return out;
+    }
+
     this.reportUnknown(type);
+    return out;
+  }
+
+  private recordSearchCall(item: any): void {
+    if (item?.type !== "web_search_call" || typeof item.id !== "string") return;
+    if (item.action?.type !== "search") return;
+    const query = typeof item.action.query === "string" ? item.action.query.trim() : "";
+    if (!query || this.seenSearchIds.has(item.id)) return;
+    this.seenSearchIds.add(item.id);
+    this.pendingSearches.push({ callId: item.id, query });
+  }
+
+  private recordMessageAnnotations(item: any): void {
+    if (item?.type !== "message" || !Array.isArray(item.content)) return;
+    for (const part of item.content) {
+      for (const annotation of part?.annotations || []) {
+        this.recordCitation(annotation);
+      }
+    }
+  }
+
+  private recordCitation(annotation: any): void {
+    if (annotation?.type !== "url_citation" || typeof annotation.url !== "string") return;
+    const url = annotation.url;
+    const title = typeof annotation.title === "string" ? annotation.title : url;
+    const key = `${url}\n${title}`;
+    if (this.seenCitations.has(key)) return;
+    this.seenCitations.add(key);
+    this.pendingCitations.push({ url, title });
+  }
+
+  /**
+   * Collects buffered provider-search activity as Anthropic citation blocks.
+   * Searches stream no deltas upstream, so everything flushes at completion:
+   * one server_tool_use per search query, then a single aggregated
+   * web_search_tool_result. Blocks are left OPEN on purpose — finishStream
+   * closes every open block in order right after.
+   */
+  private flushSearchCitations(): string[] {
+    const out: string[] = [];
+    if (this.pendingSearches.length === 0 && this.pendingCitations.length === 0) return out;
+    for (const search of this.pendingSearches) {
+      const [index] = this.blocks.allocExtra(1);
+      out.push(
+        contentBlockStartEvent(index, {
+          type: "server_tool_use",
+          id: search.callId,
+          name: "web_search",
+          input: {},
+        }),
+      );
+      out.push(inputJsonDeltaEvent(index, JSON.stringify({ query: search.query })));
+    }
+    if (this.pendingCitations.length > 0) {
+      const [index] = this.blocks.allocExtra(1);
+      const toolUseId = this.pendingSearches[0]?.callId ?? `srvtoolu_${Date.now()}`;
+      const content = this.pendingCitations.map((citation) => ({
+        type: "web_search_result",
+        title: citation.title,
+        url: citation.url,
+      }));
+      out.push(
+        contentBlockStartEvent(index, {
+          type: "web_search_tool_result",
+          tool_use_id: toolUseId,
+          content,
+        }),
+      );
+      out.push(inputJsonDeltaEvent(index, JSON.stringify(content)));
+    }
     return out;
   }
 
@@ -721,12 +811,13 @@ export class CodexTransformer implements Transformer {
     };
 
     if (Array.isArray(request.tools) && request.tools.length > 0) {
-      transformed.tools = request.tools.map((tool) => ({
-        type: "function",
-        name: tool.function.name,
-        description: tool.function.description,
-        parameters: tool.function.parameters,
-      }));
+      // Server-side tools (web_search_*, ...) have no function schema;
+      // mapping them blindly throws here (gateway 500) or emits malformed
+      // entries upstream rejects. Translate or skip instead.
+      const mapped = mapResponsesTools(request.tools, (message) =>
+        this.logger?.warn?.(`[CODEX] ${message}`),
+      );
+      if (mapped) transformed.tools = mapped;
     }
 
     if (request.tool_choice !== undefined) {

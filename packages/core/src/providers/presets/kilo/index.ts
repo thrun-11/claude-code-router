@@ -5,9 +5,8 @@ export const kiloProviderPreset: ProviderPreset = {
   aliases: ["kilo", "kilo-ai", "kilo-code"],
   defaultModels: [
     "kilo-auto/free",
-    "thinkingmachines/inkling:free",
-    "minimax/minimax-m2.7:free",
-    "minimax/minimax-m3:free",
+    "thinkingmachines/inkling-small:free",
+    "qwen/qwen3.8-27b:free",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
     "stepfun/step-3.7-flash:free",

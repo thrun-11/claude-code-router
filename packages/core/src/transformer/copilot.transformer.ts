@@ -1,5 +1,6 @@
 import { Transformer, TransformerContext } from "@ccr/core/types/transformer";
 import { LLMProvider, UnifiedChatRequest, UnifiedMessage } from "@ccr/core/types/llm";
+import { mapClaudeTools } from "@ccr/core/transformer/server-tools";
 import {
   copilotBaseUrl,
   copilotHeaders,
@@ -518,11 +519,11 @@ export class CopilotTransformer implements Transformer {
   private transformClaudeTools(tools: any[]): any {
     if (!tools || tools.length === 0) return undefined;
 
-    return tools.map((tool: any) => ({
-      name: tool.function?.name,
-      description: tool.function?.description,
-      input_schema: tool.function?.parameters,
-    }));
+    // Server-side tools originated on the Anthropic surface: pass through
+    // verbatim so they keep their native shape. Anything else unmappable is
+    // dropped (a nameless entry fails the whole request upstream).
+    const mapped = mapClaudeTools(tools, (message) => this.logger?.warn?.(`[copilot] ${message}`));
+    return mapped && mapped.length > 0 ? mapped : undefined;
   }
 
   async transformResponseOut(

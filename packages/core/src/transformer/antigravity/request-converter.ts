@@ -11,6 +11,7 @@ import {
   convertRole,
 } from "./content-converter";
 import { sanitizeSchema, cleanSchema, cleanCacheControl } from "./schema-sanitizer";
+import { isWebSearchTool } from "@ccr/core/transformer/server-tools";
 import {
   hasGeminiHistory,
   hasUnsignedThinkingBlocks,
@@ -120,7 +121,24 @@ export function convertAnthropicToGoogle(
       parts.push({ text: "." });
     }
 
-    const role = convertRole(msg.role);
+    let role = convertRole(msg.role);
+
+    if (isGeminiModel && parts.length > 0 && parts.every((p) => p.functionResponse)) {
+      // CLI parity (MITM 2026-10-14, agy 1.3.5): the official client
+      // replays tool results in a model-role turn, not a user turn.
+      // Only pure-result messages are converted; mixed text+result
+      // messages keep the caller role.
+      role = "model";
+    } else if (isGeminiModel && role === "user") {
+      // CLI parity: user request text is framed so the model can tell
+      // requests apart from tool output and replayed history. Applied
+      // to text parts only; tool calls and results ride unmodified.
+      for (const p of parts) {
+        if (typeof p.text === "string" && p.text.trim()) {
+          p.text = `<USER_REQUEST> ${p.text} </USER_REQUEST>`;
+        }
+      }
+    }
 
     if (role) {
       googleRequest.contents.push({
@@ -167,23 +185,45 @@ export function convertAnthropicToGoogle(
         googleRequest.generationConfig.maxOutputTokens = thinkingBudget + 8192;
       }
     } else if (isGeminiModel) {
-      let thinkingBudget = clampGeminiThinkingBudget(modelName, thinking?.budget_tokens);
-      const maxOutputTokens = googleRequest.generationConfig.maxOutputTokens;
-      if (typeof maxOutputTokens === "number" && maxOutputTokens > 0) {
-        // Thinking tokens count against maxOutputTokens: without headroom
-        // the model burns the whole budget thinking and the answer
-        // truncates mid-stream (only a fresh-budget "resume" continues it).
-        thinkingBudget = Math.min(thinkingBudget, Math.max(1024, maxOutputTokens - 4096));
+      // CLI parity (MITM-verified 2026-10-14, agy 1.3.5): the official
+      // client sends thinkingBudget -1 (dynamic — the backend manages
+      // thinking spend itself) whenever the caller did not request an
+      // explicit budget. Only explicit caller budgets go through the
+      // clamp + headroom path below.
+      if (thinking?.budget_tokens === undefined) {
+        googleRequest.generationConfig.thinkingConfig = {
+          includeThoughts: true,
+          thinkingBudget: -1,
+        };
+      } else {
+        let thinkingBudget = clampGeminiThinkingBudget(modelName, thinking.budget_tokens);
+        const maxOutputTokens = googleRequest.generationConfig.maxOutputTokens;
+        if (typeof maxOutputTokens === "number" && maxOutputTokens > 0) {
+          // Thinking tokens count against maxOutputTokens: without headroom
+          // the model burns the whole budget thinking and the answer
+          // truncates mid-stream (only a fresh-budget "resume" continues it).
+          thinkingBudget = Math.min(thinkingBudget, Math.max(1024, maxOutputTokens - 4096));
+        }
+        googleRequest.generationConfig.thinkingConfig = {
+          includeThoughts: true,
+          thinkingBudget,
+        };
       }
-      googleRequest.generationConfig.thinkingConfig = {
-        includeThoughts: true,
-        thinkingBudget,
-      };
     }
   }
 
   if (tools && tools.length > 0) {
-    const functionDeclarations = tools.map((tool: any, idx: number) => {
+    // Anthropic server web_search must become Gemini's native grounding tool.
+    // Flattening it into a function declaration leaves a dead function no
+    // one executes (verified live: model calls it, results never arrive).
+    // Only for non-Claude models: Claude-targeted requests keep today's
+    // shape, and a real function literally named web_search keeps its schema.
+    const groundSearch =
+      !isClaudeModel && (tools as any[]).some((tool: any) => isWebSearchTool(tool));
+    const functionTools = groundSearch
+      ? (tools as any[]).filter((tool: any) => !isWebSearchTool(tool))
+      : tools;
+    const functionDeclarations = functionTools.map((tool: any, idx: number) => {
       const name =
         tool.name ||
         tool.function?.name ||
@@ -212,10 +252,13 @@ export function convertAnthropicToGoogle(
       };
     });
 
-    if (functionDeclarations.length > 0) {
-      googleRequest.tools = [{ functionDeclarations }];
+    if (functionDeclarations.length > 0 || groundSearch) {
+      googleRequest.tools = [
+        ...(functionDeclarations.length > 0 ? [{ functionDeclarations }] : []),
+        ...(groundSearch ? [{ google_search: {} }] : []),
+      ];
 
-      if (isClaudeModel) {
+      if (isClaudeModel && functionDeclarations.length > 0) {
         googleRequest.toolConfig = {
           functionCallingConfig: {
             mode: "AUTO",

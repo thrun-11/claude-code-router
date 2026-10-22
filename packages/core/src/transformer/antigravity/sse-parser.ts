@@ -16,6 +16,37 @@ export interface StreamResponseOptions {
   onUnknownPart?: (info: string) => void;
 }
 
+export interface GroundingAccumulator {
+  queries: string[];
+  seenQueries: Set<string>;
+  sources: Array<{ title: string; url: string }>;
+  seenUrls: Set<string>;
+}
+
+export function createGroundingAccumulator(): GroundingAccumulator {
+  return { queries: [], seenQueries: new Set(), sources: [], seenUrls: new Set() };
+}
+
+/** Merges one candidate's groundingMetadata into the accumulator (deduped). */
+export function mergeGroundingMetadata(acc: GroundingAccumulator, candidate: any): void {
+  const grounding = candidate?.groundingMetadata;
+  if (!grounding || typeof grounding !== "object") return;
+  for (const query of Array.isArray(grounding.webSearchQueries) ? grounding.webSearchQueries : []) {
+    if (typeof query !== "string" || !query.trim() || acc.seenQueries.has(query)) continue;
+    acc.seenQueries.add(query);
+    acc.queries.push(query);
+  }
+  for (const chunk of Array.isArray(grounding.groundingChunks) ? grounding.groundingChunks : []) {
+    const web = chunk?.web;
+    if (!web || typeof web.uri !== "string" || !web.uri || acc.seenUrls.has(web.uri)) continue;
+    acc.seenUrls.add(web.uri);
+    acc.sources.push({
+      title: typeof web.title === "string" && web.title ? web.title : web.uri,
+      url: web.uri,
+    });
+  }
+}
+
 export async function* streamSSEResponse(
   response: Response,
   model: string,
@@ -39,6 +70,12 @@ export async function* streamSSEResponse(
   let outputTokens = 0;
   let cacheReadTokens = 0;
   let stopReason: string | null = null;
+  // Tracks emitted tool calls by stable upstream id. Proxies/aggregators
+  // sometimes replay the same functionCall part across chunks; re-emitting
+  // the full args each time concatenates duplicate JSON downstream
+  // (InputValidationError). Entries map id -> { block index, args JSON }.
+  const emittedTools = new Map<string, { index: number; args: string }>();
+  const grounding = createGroundingAccumulator();
 
   const reportUnknownPart = (part: any): void => {
     const shape = Object.keys(part || {}).sort().join(",");
@@ -106,6 +143,7 @@ export async function* streamSSEResponse(
         const firstCandidate = candidates[0] || {};
         const content = firstCandidate.content || {};
         const parts = content.parts || [];
+        mergeGroundingMetadata(grounding, firstCandidate);
 
         if (!hasEmittedStart && parts.length > 0) {
           hasEmittedStart = true;
@@ -187,6 +225,19 @@ export async function* streamSSEResponse(
             };
           } else if ((part as any).functionCall) {
             const fc = (part as any).functionCall;
+            const argsJson = JSON.stringify(fc.args || {});
+
+            // Dedupe replays: aggregators sometimes resend the same
+            // functionCall part across chunks. Re-emitting the full args
+            // would concatenate duplicate JSON downstream
+            // (InputValidationError), so identical repeats are skipped.
+            // Genuinely different args under a reused id fall through as a
+            // new call to preserve data. No-id parts cannot be proven
+            // duplicates, so they always emit (previous behavior).
+            if (typeof fc.id === "string" && fc.id) {
+              const seen = emittedTools.get(fc.id);
+              if (seen && seen.args === argsJson) continue;
+            }
 
             if (currentBlockType !== null) {
               const sigEv = flushSignature();
@@ -216,9 +267,13 @@ export async function* streamSSEResponse(
               index: blockIndex,
               delta: {
                 type: "input_json_delta",
-                partial_json: JSON.stringify(fc.args || {}),
+                partial_json: argsJson,
               },
             };
+
+            if (typeof fc.id === "string" && fc.id) {
+              emittedTools.set(fc.id, { index: blockIndex, args: argsJson });
+            }
           } else if ((part as any).inlineData) {
             const img = (part as any).inlineData;
 
@@ -278,6 +333,52 @@ export async function* streamSSEResponse(
   const closeEv = closeBlock();
   if (closeEv) yield closeEv;
 
+  // Grounded searches collected across chunks flush here, after live content
+  // and before the terminal delta — same ordering as the Responses path.
+  // Citations aggregate into one result block linked to the first query.
+  if (grounding.queries.length > 0 || grounding.sources.length > 0) {
+    let firstUseId: string | undefined;
+    for (const query of grounding.queries) {
+      const id = `srvtoolu_grounding_${Math.random().toString(36).slice(2, 14)}`;
+      firstUseId ??= id;
+      yield {
+        type: "content_block_start",
+        index: blockIndex,
+        content_block: { type: "server_tool_use", id, name: "web_search", input: {} },
+      };
+      yield {
+        type: "content_block_delta",
+        index: blockIndex,
+        delta: { type: "input_json_delta", partial_json: JSON.stringify({ query }) },
+      };
+      yield { type: "content_block_stop", index: blockIndex };
+      blockIndex++;
+    }
+    if (grounding.sources.length > 0) {
+      const content = grounding.sources.map((source) => ({
+        type: "web_search_result",
+        title: source.title,
+        url: source.url,
+      }));
+      yield {
+        type: "content_block_start",
+        index: blockIndex,
+        content_block: {
+          type: "web_search_tool_result",
+          tool_use_id: firstUseId ?? `srvtoolu_${Date.now()}`,
+          content,
+        },
+      };
+      yield {
+        type: "content_block_delta",
+        index: blockIndex,
+        delta: { type: "input_json_delta", partial_json: JSON.stringify(content) },
+      };
+      yield { type: "content_block_stop", index: blockIndex };
+      blockIndex++;
+    }
+  }
+
   yield {
     type: "message_delta",
     delta: { stop_reason: stopReason || "end_turn", stop_sequence: null },
@@ -298,6 +399,7 @@ export async function accumulateSSEToResponse(response: Response, model: string)
   let outputTokens = 0;
   let cacheReadTokens = 0;
   let stopReason: string | null = null;
+  const grounding = createGroundingAccumulator();
 
   const reader = response.body?.getReader();
   if (!reader) {
@@ -337,10 +439,25 @@ export async function accumulateSSEToResponse(response: Response, model: string)
 
         const candidates = innerResponse.candidates || [];
         const firstCandidate = candidates[0] || {};
+        mergeGroundingMetadata(grounding, firstCandidate);
         const content = firstCandidate.content || {};
         const partsArr = content.parts || [];
 
         for (const part of partsArr) {
+          // Same replay protection as the streaming path: an identical
+          // functionCall id+args pair collapses into one entry, so the
+          // collapsed response cannot contain duplicate tool_use blocks.
+          const callId = (part as any)?.functionCall?.id;
+          if (typeof callId === "string" && callId) {
+            const at = parts.findIndex(
+              (entry: any) => entry?.functionCall?.id === callId,
+            );
+            if (at >= 0) {
+              const prevArgs = JSON.stringify((parts[at] as any).functionCall.args || {});
+              const nextArgs = JSON.stringify((part as any).functionCall.args || {});
+              if (nextArgs === prevArgs) continue;
+            }
+          }
           parts.push(part);
         }
 
@@ -383,6 +500,16 @@ export async function accumulateSSEToResponse(response: Response, model: string)
         {
           content: { parts },
           finishReason: stopReason?.toUpperCase() || "STOP",
+          ...(grounding.queries.length > 0 || grounding.sources.length > 0
+            ? {
+                groundingMetadata: {
+                  webSearchQueries: grounding.queries,
+                  groundingChunks: grounding.sources.map((source) => ({
+                    web: { uri: source.url, title: source.title },
+                  })),
+                },
+              }
+            : {}),
         },
       ],
       usageMetadata: {

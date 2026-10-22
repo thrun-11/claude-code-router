@@ -126,6 +126,103 @@ test("incomplete maps max_output_tokens, failed emits an error event", () => {
   assert.equal(e2.some((e) => e.type === "message_stop"), false);
 });
 
+test("output_item.done with full args after deltas does not duplicate JSON", () => {
+  // Regression: muse-spark streams argument deltas AND a full snapshot in
+  // output_item.done. Re-emitting the snapshot doubled the tool input
+  // downstream (Claude Code: InputValidationError, concatenated JSON).
+  const c = new ResponsesToAnthropicStream("m");
+  const args = '{"command":"ls -la"}';
+  const raw =
+    frame("response.created", { response: { id: "r", model: "m" } }) +
+    frame("response.output_item.added", {
+      output_index: 0,
+      item: { id: "fc_1", type: "function_call", call_id: "call_1", name: "Bash", arguments: "" },
+    }) +
+    frame("response.function_call_arguments.delta", { item_id: "fc_1", output_index: 0, delta: '{"command"' }) +
+    frame("response.function_call_arguments.delta", { item_id: "fc_1", output_index: 0, delta: ':"ls -la"}' }) +
+    frame("response.output_item.done", {
+      output_index: 0,
+      item: { id: "fc_1", type: "function_call", call_id: "call_1", name: "Bash", arguments: args },
+    }) +
+    frame("response.completed", { response: { status: "completed", usage: {} } });
+  const events = parseEvents(feed(c, raw));
+  const deltas = events.filter(
+    (e) => e.type === "content_block_delta" && e.delta.type === "input_json_delta"
+  );
+  assert.equal(deltas.map((d) => d.delta.partial_json).join(""), args);
+});
+
+test("output_item.done with full args and no deltas still fills the block", () => {
+  const c = new ResponsesToAnthropicStream("m");
+  const args = '{"command":"ls -la"}';
+  const raw =
+    frame("response.created", { response: { id: "r", model: "m" } }) +
+    frame("response.output_item.added", {
+      output_index: 0,
+      item: { id: "fc_1", type: "function_call", call_id: "call_1", name: "Bash", arguments: "" },
+    }) +
+    frame("response.function_call_arguments.delta", { item_id: "fc_1", output_index: 0, delta: '{"command"' }) +
+    frame("response.function_call_arguments.delta", { item_id: "fc_1", output_index: 0, delta: ':"ls -la"}' }) +
+    frame("response.output_item.done", {
+      output_index: 0,
+      item: { id: "fc_1", type: "function_call", call_id: "call_1", name: "Bash", arguments: args },
+    }) +
+    frame("response.completed", { response: { status: "completed", usage: {} } });
+  const events = parseEvents(feed(c, raw));
+  const deltas = events.filter(
+    (e) => e.type === "content_block_delta" && e.delta.type === "input_json_delta"
+  );
+  assert.equal(deltas.map((d) => d.delta.partial_json).join(""), args);
+});
+
+test("web searches flush as server_tool_use plus aggregated citations", () => {
+  const c = new ResponsesToAnthropicStream("m");
+  const raw =
+    frame("response.created", { response: { id: "r", model: "m" } }) +
+    frame("response.output_item.added", {
+      output_index: 0,
+      item: { id: "ws_1", type: "web_search_call", status: "in_progress", action: { type: "search", query: "Who won?" } },
+    }) +
+    frame("response.output_item.added", {
+      output_index: 1,
+      item: { id: "msg_1", type: "message" },
+    }) +
+    frame("response.output_text.delta", { output_index: 1, delta: "Spain won." }) +
+    frame("response.output_text.annotation.added", {
+      output_index: 1,
+      annotation: { type: "url_citation", title: "T", url: "https://x.example/y" },
+    }) +
+    frame("response.output_text.annotation.added", {
+      output_index: 1,
+      annotation: { type: "url_citation", title: "T", url: "https://x.example/y" },
+    }) +
+    frame("response.output_item.done", {
+      output_index: 0,
+      item: { id: "ws_1", type: "web_search_call", status: "completed", action: { type: "search", query: "Who won?" } },
+    }) +
+    frame("response.completed", { response: { status: "completed", usage: {} } });
+  const events = parseEvents(feed(c, raw));
+  const starts = events.filter((e) => e.type === "content_block_start");
+  const use = starts.find((e) => e.content_block.type === "server_tool_use");
+  assert.ok(use, "server_tool_use block emitted");
+  assert.equal(use.content_block.name, "web_search");
+  const result = starts.find((e) => e.content_block.type === "web_search_tool_result");
+  assert.ok(result, "citation result block emitted");
+  assert.equal(result.content_block.tool_use_id, "ws_1");
+  assert.deepEqual(result.content_block.content, [
+    { type: "web_search_result", title: "T", url: "https://x.example/y" },
+  ]);
+  const useDeltas = events.filter(
+    (e) => e.type === "content_block_delta" && e.delta.type === "input_json_delta"
+  );
+  const queryDelta = useDeltas.find((e) => e.delta.partial_json.includes("Who won?"));
+  assert.ok(queryDelta, "search query streamed as input delta");
+  assert.equal(
+    events.find((e) => e.type === "message_delta").delta.stop_reason,
+    "end_turn"
+  );
+});
+
 test("unknown events and pings are ignored, finish is idempotent", () => {
   const c = new ResponsesToAnthropicStream("m");
   const raw =
