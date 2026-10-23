@@ -232,7 +232,11 @@ function localAgentAuthProviderHookPluginConfig(providerPlugins: unknown[]): Rec
     return undefined;
   }
   return {
-    config: { providerPlugins: providerPlugins.filter(isLocalAgentOauthProviderPlugin) },
+    config: {
+      providerPlugins: providerPlugins.filter(
+        (plugin) => isLocalAgentOauthProviderPlugin(plugin) || isOpenCodePublicFreeTierPlugin(plugin)
+      )
+    },
     enabled: true,
     key: localAgentAuthProviderHookPluginKey,
     modulePath: resolveLocalAgentAuthProviderHookEntry()

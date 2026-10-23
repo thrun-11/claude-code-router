@@ -189,6 +189,9 @@ async function resolveLiveKimiAccessToken(plugin: Record<string, unknown>): Prom
 }
 
 function transformOpenCodePublicFreeTierRequest(input: ProviderPluginInput): ProviderHookResult {
+  if (isOpenCodeForkFingerprinted(input.upstreamRequest.headers)) {
+    return { ok: true, value: input.upstreamRequest };
+  }
   return {
     ok: true,
     value: {
@@ -197,6 +200,15 @@ function transformOpenCodePublicFreeTierRequest(input: ProviderPluginInput): Pro
       headers: applyOpenCodePublicFreeTierHeaders(input.upstreamRequest.headers)
     }
   };
+}
+
+function isOpenCodeForkFingerprinted(headers?: HeaderRecord): boolean {
+  if (!headers) return false;
+  const entries = Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value] as const);
+  const sessionHeader = entries.find(([key]) => key === "x-opencode-session-id");
+  if (typeof sessionHeader?.[1] === "string" && sessionHeader[1].trim()) return true;
+  const userAgent = entries.find(([key]) => key === "user-agent")?.[1];
+  return typeof userAgent === "string" && userAgent.includes("ai-sdk/provider-utils");
 }
 
 function transformWithHeaders(input: ProviderPluginInput, headers: HeaderRecord): ProviderHookResult {
