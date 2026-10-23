@@ -1,7 +1,9 @@
+import "../scripts/generate-models-json.mjs";
 import {
   buildBrowserRenderer,
   buildCoreServer,
   buildRenderer,
+  buildRequestLogBodyWorker,
   buildStyles,
   buildTrayRenderer,
   buildWebClientBridge,
@@ -25,6 +27,7 @@ await Promise.all([
   buildCoreServer({ mode }),
   buildBrowserRenderer({ mode }),
   buildRenderer({ mode }),
+  buildRequestLogBodyWorker({ mode }),
   buildTrayRenderer({ mode }),
   buildWebClientBridge({ mode }),
   buildStyles({ minify: mode === "production" })

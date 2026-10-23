@@ -639,6 +639,7 @@ export type GatewayProviderProbeResult = {
   modelSource?: "anthropic" | "gemini" | "openai";
   models: string[];
   normalizedBaseUrl: string;
+  protocolModels?: Partial<Record<GatewayProviderCapabilityProtocol, string[]>>;
   protocols: GatewayProviderProbeProtocolResult[];
 };
 
@@ -1082,6 +1083,7 @@ export type VirtualModelFusionWebSearchProvider =
   | "google_cse"
   | "serper"
   | "serpapi"
+  | "serply"
   | "tavily"
   | "exa";
 
@@ -1831,6 +1833,8 @@ export type BotGatewayQrWindowCloseResult = {
 };
 
 export type AppConfig = {
+  /** Revision returned by getConfig; required when replacing existing settings. */
+  configRevision?: string;
   APIKEY: string;
   APIKEYS: ApiKeyConfig[];
   API_TIMEOUT_MS: number | string;
@@ -1857,6 +1861,7 @@ export type AppConfig = {
   routerEndpoint: string;
   theme: "system" | "light" | "dark";
   trayBalanceProgress?: TrayBalanceProgressConfig;
+  trayShowTokenRate: boolean;
   trayProgressTargetTokens: number;
   trayComponentVariants: TrayComponentVariants;
   trayIcon: TrayIconPreference;
@@ -2193,7 +2198,39 @@ export type RequestRouteTrace = {
   version: 1 | 2;
 };
 
+export type StreamSpeedSampleStatus =
+  | "complete"
+  | "partial"
+  | "usage_missing"
+  | "insufficient_tokens"
+  | "unsupported_protocol"
+  | "hidden_reasoning"
+  | "batched_output";
+
+export type RequestStreamMetrics = {
+  activeOutputMs?: number;
+  estimatedOutputTokens: number;
+  maxInterEventGapMs?: number;
+  p95InterEventGapMs?: number;
+  reasoningObserved: boolean;
+  responseHeadersMs?: number;
+  sampleStatus: StreamSpeedSampleStatus;
+  tailMs?: number;
+  textObserved: boolean;
+  timeToFirstSignalMs?: number;
+  timeToFirstTextMs?: number;
+  toolObserved: boolean;
+  upstreamTimeToFirstSignalMs?: number;
+};
+
+export function requestLogOutcome(entry: { error?: string; ok: boolean; statusCode: number }): "completed" | "error" | "unknown" {
+  if (entry.error) return "error";
+  if (entry.statusCode <= 0) return "unknown";
+  return entry.ok ? "completed" : "error";
+}
+
 export type RequestLogEntry = {
+  activeOutputMs?: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
   client: string;
@@ -2208,13 +2245,17 @@ export type RequestLogEntry = {
   id: number;
   inputTokens: number;
   isStream: boolean;
+  maxInterEventGapMs?: number;
   method: string;
   model: string;
   ok: boolean;
   outputTokens: number;
+  outputTokensPerSecond?: number;
   path: string;
+  p95InterEventGapMs?: number;
   provider: string;
   reasoningTokens: number;
+  responseHeadersMs?: number;
   requestedModel?: string;
   requestBody: RequestLogBody;
   requestHeaders: Record<string, string | string[]>;
@@ -2229,7 +2270,12 @@ export type RequestLogEntry = {
   responseModel?: string;
   responseHeaders: Record<string, string | string[]>;
   statusCode: number;
+  streamSpeedSampleStatus?: StreamSpeedSampleStatus;
+  tailMs?: number;
+  timeToFirstSignalMs?: number;
+  timeToFirstTextMs?: number;
   totalTokens: number;
+  upstreamTimeToFirstSignalMs?: number;
   url: string;
 };
 

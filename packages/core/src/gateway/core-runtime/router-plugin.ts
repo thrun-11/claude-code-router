@@ -1,6 +1,6 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { Readable } from "node:stream";
+import { pipeline, Readable } from "node:stream";
 import type { ApiKeyConfig, AppConfig, GatewayProviderConfig, GatewayProviderProtocol, ProfileConfig, RouterRule } from "@ccr/core/contracts/app";
 import {
   claudeCodeWifTokenPath,
@@ -13,11 +13,15 @@ import {
   type ClaudeCodeRouteDecision
 } from "@ccr/core/gateway/claude-code-router-plugin";
 import {
+  ccrAnthropicReasoningResponseHookKey,
   ccrCodexApplyPatchBridgeHeader,
   ccrCodexBridgeRequestTransformKey,
   ccrCodexBridgeResponseHookKey,
   ccrCodexBridgeStreamHookKey,
   ccrCodexMultiAgentBridgeHeader,
+  ccrLiveTokenRateConfigMessageType,
+  ccrLiveTokenRateSnapshotMessageType,
+  ccrLiveTokenRateStreamHookKey,
   ccrOpenRouterDiscountFinalizeResponseHookKey,
   ccrOpenRouterDiscountFinalizeStreamHookKey,
   ccrOpenRouterDiscountRequestIdHeader,
@@ -39,6 +43,7 @@ import {
   encodeCcrRouteFallbackHeader,
   type CcrRouterPluginRouteRequest
 } from "@ccr/core/gateway/core-runtime/router-plugin-contract";
+import { coalesceAnthropicReasoningResponse } from "@ccr/core/gateway/features/anthropic-reasoning-response";
 import { coreGatewayAuthHeader, rawTraceSyncHeader, rawTraceSyncPath, sdkCompatibleTokenHeaderNames } from "@ccr/core/gateway/internal/shared";
 import { gatewayRuntimeConfigControlPath, gatewayRuntimeConfigRevision } from "@ccr/core/gateway/runtime-config-control";
 import {
@@ -57,6 +62,7 @@ import {
   transformCodexMultiAgentBridgeResponseValue
 } from "@ccr/core/gateway/features/codex-multi-agent-bridge";
 import { requestLogRequestedModel } from "@ccr/core/observability/request-log-model";
+import { createStreamExperienceMeter, LiveTokenRateTracker } from "@ccr/core/observability/stream-experience";
 import {
   finalizeOpenRouterDiscountProviderRouterSelection,
   openRouterDiscountProviderRouterTransform
@@ -170,6 +176,8 @@ type GatewayStreamHookInput = {
     method?: string;
     url?: string;
   };
+  targetProvider?: string;
+  targetProviderConfig?: Pick<GatewayProviderConfig, "provider" | "type">;
   upstreamRequest?: UpstreamRequest;
   upstreamResponse: Response;
 };
@@ -202,6 +210,7 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
     scriptValidationErrors
   });
   const openRouterDiscountContext = openRouterDiscountTransformContext(config);
+  const liveTokenRatePublisher = coreGatewayLiveTokenRatePublisherFor(config.trayShowTokenRate);
 
   return {
     httpRoutes: [{
@@ -437,6 +446,12 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
         applyCodexBridgeRequestTransform(config, requestInput)
     }],
     responseHooks: [{
+      key: ccrAnthropicReasoningResponseHookKey,
+      transformResponse: (responseInput: GatewayResponseHookInput) => {
+        const transformed = coalesceAnthropicReasoningResponse(responseInput.responsePayload);
+        return transformed.changed ? { responsePayload: transformed.value } : undefined;
+      }
+    }, {
       key: ccrCodexBridgeResponseHookKey,
       transformResponse: (responseInput: GatewayResponseHookInput) =>
         applyCodexBridgeResponseTransform(responseInput)
@@ -457,6 +472,10 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
         finalizeOpenRouterDiscountSelection(streamInput);
         return undefined;
       }
+    }, {
+      key: ccrLiveTokenRateStreamHookKey,
+      transformResponse: (streamInput: GatewayStreamHookInput) =>
+        applyLiveTokenRateStreamTransform(streamInput, liveTokenRatePublisher)
     }],
     routeResolvers: [{
       key: ccrRouterRouteResolverKey,
@@ -464,6 +483,129 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
         resolveCcrGatewayRoute(config, requestInput)
     }]
   };
+}
+
+const liveTokenRatePublishIntervalMs = 250;
+let sharedCoreGatewayLiveTokenRatePublisher: CoreGatewayLiveTokenRatePublisher | undefined;
+
+class CoreGatewayLiveTokenRatePublisher {
+  readonly tracker = new LiveTokenRateTracker();
+  private enabled = false;
+  private lastPublishedAt = 0;
+  private publishTimer?: NodeJS.Timeout;
+
+  constructor(enabled: boolean) {
+    process.on("message", this.handleMessage);
+    this.configure(enabled);
+  }
+
+  configure(enabled: boolean): void {
+    const nextEnabled = enabled && typeof process.send === "function";
+    if (this.enabled === nextEnabled) {
+      return;
+    }
+    this.enabled = nextEnabled;
+    if (!nextEnabled) {
+      this.tracker.clear();
+    }
+    this.publishNow();
+  }
+
+  isEnabled(): boolean {
+    return this.enabled;
+  }
+
+  notifyActivity(urgent: boolean): void {
+    if (!this.enabled) {
+      return;
+    }
+    const delayMs = liveTokenRatePublishIntervalMs - (Date.now() - this.lastPublishedAt);
+    if (urgent || delayMs <= 0) {
+      this.publishNow();
+      return;
+    }
+    if (this.publishTimer) {
+      return;
+    }
+    this.publishTimer = setTimeout(() => {
+      this.publishTimer = undefined;
+      this.publishNow();
+    }, delayMs);
+    this.publishTimer.unref?.();
+  }
+
+  private readonly handleMessage = (message: unknown): void => {
+    if (!isRecord(message) || message.type !== ccrLiveTokenRateConfigMessageType || message.protocolVersion !== 1) {
+      return;
+    }
+    this.configure(message.enabled === true);
+  };
+
+  private publishNow(): void {
+    if (this.publishTimer) {
+      clearTimeout(this.publishTimer);
+      this.publishTimer = undefined;
+    }
+    this.lastPublishedAt = Date.now();
+    const snapshot = this.enabled
+      ? this.tracker.snapshot()
+      : { activeRequests: 0, tokensPerSecond: 0 };
+    try {
+      process.send?.({
+        ...snapshot,
+        protocolVersion: 1,
+        type: ccrLiveTokenRateSnapshotMessageType
+      });
+    } catch {
+      this.enabled = false;
+      this.tracker.clear();
+      return;
+    }
+    if (this.enabled && snapshot.activeRequests > 0) {
+      this.publishTimer = setTimeout(() => {
+        this.publishTimer = undefined;
+        this.publishNow();
+      }, liveTokenRatePublishIntervalMs);
+      this.publishTimer.unref?.();
+    }
+  }
+}
+
+function coreGatewayLiveTokenRatePublisherFor(enabled: boolean): CoreGatewayLiveTokenRatePublisher {
+  sharedCoreGatewayLiveTokenRatePublisher ??= new CoreGatewayLiveTokenRatePublisher(enabled);
+  sharedCoreGatewayLiveTokenRatePublisher.configure(enabled);
+  return sharedCoreGatewayLiveTokenRatePublisher;
+}
+
+function applyLiveTokenRateStreamTransform(
+  streamInput: GatewayStreamHookInput,
+  publisher: CoreGatewayLiveTokenRatePublisher
+): Response | undefined {
+  if (!publisher.isEnabled() || !streamInput.upstreamResponse.body) {
+    return undefined;
+  }
+  const protocol = normalizeProviderProtocol(streamInput.targetProviderConfig?.type) ??
+    normalizeProviderProtocol(streamInput.targetProviderConfig?.provider) ??
+    normalizeProviderProtocol(streamInput.targetProvider);
+  const meter = createStreamExperienceMeter({
+    contentType: streamInput.upstreamResponse.headers.get("content-type") ?? undefined,
+    liveRateTracker: publisher.tracker,
+    onLiveRateActivity: (urgent) => publisher.notifyActivity(urgent),
+    protocol,
+    publishLiveRate: true,
+    requestId: readGatewayRequestId(streamInput) ?? randomUUID()
+  });
+  const source = Readable.fromWeb(
+    streamInput.upstreamResponse.body as unknown as Parameters<typeof Readable.fromWeb>[0]
+  );
+  // pipeline (not pipe) forwards an upstream reset to the response body;
+  // with pipe the source's 'error' is unhandled and kills the core process.
+  const metered = pipeline(source, meter.stream, () => {});
+  return new Response(Readable.toWeb(metered) as ReadableStream<Uint8Array>, {
+    headers: new Headers(streamInput.upstreamResponse.headers),
+    status: streamInput.upstreamResponse.status,
+    statusText: streamInput.upstreamResponse.statusText
+  });
 }
 
 async function handleRuntimeConfigControlRoute(
@@ -919,7 +1061,7 @@ function resolveCcrGatewayRoute(
 
   const publicModel = resolveGatewayPublicModelId(routedModel, config) ?? routedModel;
   const modelRegistry = modelRegistryForConfig(config);
-  const resolved = modelRegistry.resolve(publicModel) ??
+  const resolved = modelRegistry.resolve(publicModel, { protocol }) ??
     resolveProfileProviderModel(config, requestInput.request?.headers, publicModel, modelRegistry);
   if (!resolved) {
     return undefined;
@@ -1029,10 +1171,7 @@ function isCoreGatewayRuntimeProviderName(
   if (!normalized) {
     return false;
   }
-  const runtimeId = providerRuntimeId(provider).toLowerCase();
-  if (normalized === runtimeId) {
-    return true;
-  }
+  // Bare provider IDs are shared aliases; resolve their protocol and credential.
   const capabilityName = providerCapabilityInternalName(provider, protocol).toLowerCase();
   return normalized === capabilityName || normalized.startsWith(`${capabilityName}::cred:`);
 }

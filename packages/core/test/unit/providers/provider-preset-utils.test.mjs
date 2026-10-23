@@ -1,5 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
+test("#1819 verified endpoints outrank synthesized presets while explicit choices win", () => {
+  const preset = { type: "openai_chat_completions", baseUrl: "https://example.test/api/compatible", source: "preset" };
+  const detected = { type: "openai_chat_completions", baseUrl: "https://example.test/api/v3", source: "detected" };
+  const manual = { type: "openai_chat_completions", baseUrl: "https://example.test/manual" };
+  for (const capabilities of [[preset, detected], [detected, preset]]) {
+    assert.deepEqual(normalizedProviderCapabilities({ name: "custom", models: ["model"], capabilities }), [detected]);
+  }
+  assert.deepEqual(normalizedProviderCapabilities({ name: "custom", models: ["model"], capabilities: [preset, detected, manual] }), [manual]);
+});
 import {
   normalizeProviderPresetCapabilitiesForTest
 } from "@ccr/core/config/config.ts";
@@ -24,6 +34,9 @@ import {
 import {
   nvidiaProviderPreset
 } from "@ccr/core/providers/presets/nvidia/index.ts";
+import {
+  openCodeGoProviderPreset
+} from "@ccr/core/providers/presets/opencode-go/index.ts";
 import {
   providerPresets
 } from "@ccr/core/providers/presets/index.ts";
@@ -126,6 +139,65 @@ test("sponsor provider presets expose requested endpoints and protocols", () => 
   assert.equal(providerPresetMatchesBaseUrl(infistarAiProviderPreset, "https://api.infistar.ai/v1"), false);
   assert.deepEqual(infistarAiProviderPreset.endpoints[0]?.protocols, [
     "openai_chat_completions"
+  ]);
+});
+
+test("OpenCode Go preset resolves the official usage endpoint without matching Zen", () => {
+  assert.equal(providerPresets.find((preset) => preset.id === "opencode-go"), openCodeGoProviderPreset);
+  assert.deepEqual(openCodeGoProviderPreset.endpoints, [
+    {
+      baseUrl: "https://opencode.ai/zen/go/v1",
+      protocols: [
+        "openai_responses",
+        "anthropic_messages",
+        "openai_chat_completions",
+        "gemini_generate_content"
+      ],
+      websiteUrl: "https://opencode.ai/docs/go/"
+    }
+  ]);
+  assert.equal(providerPresetMatchesBaseUrl(openCodeGoProviderPreset, "https://opencode.ai/zen/go/v1"), true);
+  assert.equal(providerPresetMatchesBaseUrl(openCodeGoProviderPreset, "https://opencode.ai/zen/go/v1/chat/completions"), true);
+  assert.equal(providerPresetMatchesBaseUrl(openCodeGoProviderPreset, "https://opencode.ai/zen/v1"), false);
+
+  const connector = openCodeGoProviderPreset.account?.connectors?.[0];
+  assert.equal(openCodeGoProviderPreset.account?.enabled, true);
+  assert.equal(connector?.type, "http-json");
+  assert.equal(connector?.endpoint, "https://opencode.ai/zen/go/v1/usage");
+  assert.deepEqual(connector?.mapping.meters, [
+    {
+      id: "opencode_go_5h",
+      kind: "quota",
+      label: "5h limit",
+      limit: 100,
+      remaining: "100 - $.usage.rolling.percent",
+      resetAt: "$.usage.rolling.resetsAt",
+      unit: "%",
+      used: "$.usage.rolling.percent",
+      window: "5h"
+    },
+    {
+      id: "opencode_go_weekly",
+      kind: "quota",
+      label: "Weekly limit",
+      limit: 100,
+      remaining: "100 - $.usage.weekly.percent",
+      resetAt: "$.usage.weekly.resetsAt",
+      unit: "%",
+      used: "$.usage.weekly.percent",
+      window: "weekly"
+    },
+    {
+      id: "opencode_go_monthly",
+      kind: "quota",
+      label: "Monthly limit",
+      limit: 100,
+      remaining: "100 - $.usage.monthly.percent",
+      resetAt: "$.usage.monthly.resetsAt",
+      unit: "%",
+      used: "$.usage.monthly.percent",
+      window: "monthly"
+    }
   ]);
 });
 

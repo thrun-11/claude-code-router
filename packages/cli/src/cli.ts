@@ -10,7 +10,7 @@ import { codexDesktopAppName, launchZcodeAppProfile } from "@ccr/core/agents/cod
 import { loadAppConfig } from "@ccr/core/config/config";
 import { CONFIGDIR } from "@ccr/core/config/constants";
 import { installSocketTypeOfServiceCompat } from "@ccr/core/platform/socket-compat";
-import { resolveModelCatalogPath } from "@ccr/core/models/catalog-file";
+import { refreshModelCatalog, resolveModelCatalogPath } from "@ccr/core/models/catalog-file";
 import { applyProfileConfig, applyProfileRuntimeConfig } from "@ccr/core/profiles/service";
 import { ensureProfileGateway, ProfileGatewayUnavailableError } from "@ccr/core/profiles/launch-service";
 import { buildProfileLaunchPlan, defaultProfileOpenSurface, findProfileForOpen, profileLaunchSpawnCommand, resolveProfileOpenSurface, shouldAutoStartProfileGateway } from "@ccr/core/profiles/launch-core";
@@ -31,6 +31,7 @@ type ProfileCliOptions = {
 
 type WebCliOptions = {
   command: "start" | "ui" | "web";
+  daemon: boolean;
   daemonChild: boolean;
   ensureGatewayRunning: boolean;
   help: boolean;
@@ -82,6 +83,7 @@ const prepareProfileOnlyEnv = "CCR_CLI_PREPARE_PROFILE_ONLY";
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
+  if (!options.help && options.command !== "stop") await refreshModelCatalog();
   if (options.command === "start") {
     if (options.help) {
       printStartHelp(0);
@@ -109,6 +111,13 @@ async function main(): Promise<void> {
   if (options.command === "web") {
     if (options.help) {
       printWebHelp(0);
+      return;
+    }
+    if (options.daemon) {
+      await startService({
+        ...options,
+        command: "start"
+      });
       return;
     }
     await runWebServer(options);
@@ -183,6 +192,7 @@ async function main(): Promise<void> {
   if (profile.agent === "codex" && resolvedSurface === "app" && profileOptions.agentArgs.length === 0) {
     const state = await startService({
       command: "start",
+      daemon: false,
       daemonChild: false,
       ensureGatewayRunning: true,
       help: false,
@@ -211,6 +221,7 @@ async function main(): Promise<void> {
       profileGatewayLease ??= createProfileGatewayLease();
       await startService({
         command: "start",
+        daemon: false,
         daemonChild: false,
         ensureGatewayRunning: true,
         help: false,
@@ -249,7 +260,7 @@ async function main(): Promise<void> {
       return;
     }
     if (profile.agent === "zcode" && resolvedSurface === "app" && profileOptions.agentArgs.length === 0) {
-      const launch = launchZcodeAppProfile(configDir, profile, launchConfig);
+      const launch = await launchZcodeAppProfile(configDir, profile, launchConfig);
       const spawnError = await waitForImmediateSpawnError(launch.child, 500);
       if (spawnError) {
         throw new Error(`Failed to open ZCode App: ${spawnError}`);
@@ -401,6 +412,7 @@ function parseStopArgs(args: string[]): StopCliOptions {
 function parseWebArgs(args: string[], command: WebCliOptions["command"], defaultOpen = false): WebCliOptions {
   const options: WebCliOptions = {
     command,
+    daemon: false,
     daemonChild: false,
     ensureGatewayRunning: false,
     help: false,
@@ -430,8 +442,12 @@ function parseWebArgs(args: string[], command: WebCliOptions["command"], default
       options.startGateway = false;
       continue;
     }
-    if (arg === "--daemon-child") {
-      options.daemonChild = true;
+    if (arg === "--daemon" || arg === "--daemon-child") {
+      if (arg === "--daemon") {
+        options.daemon = true;
+      } else {
+        options.daemonChild = true;
+      }
       continue;
     }
     if (arg === "--profile-managed") {
@@ -657,9 +673,9 @@ function printHelp(exitCode: number): void {
   const command = cliCommandName();
   const output = [
     "Usage:",
-    `  ${command} start [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
-    `  ${command} ui [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
-    `  ${command} serve [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
+    `  ${command} start [--daemon] [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
+    `  ${command} ui [--daemon] [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
+    `  ${command} serve [--daemon] [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
     `  ${command} stop`,
     `  ${command} auth <provider> [options]`,
     `  ${command} <profile-name-or-id> [cli|app] [-- <agent args>]`,
@@ -718,9 +734,10 @@ function printStartHelp(exitCode: number): void {
   const command = cliCommandName();
   const output = [
     "Usage:",
-    `  ${command} start [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
+    `  ${command} start [--daemon] [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
     "",
     "Options:",
+    "  --daemon         Run the management server in the background (default for start).",
     "  --host <host>    Management server host. Defaults to CCR_WEB_HOST or 127.0.0.1.",
     "  --port <port>    Management server port. Defaults to CCR_WEB_PORT or 3458.",
     "  --open           Open the management page in the default browser.",
@@ -742,11 +759,12 @@ function printUiHelp(exitCode: number): void {
   const command = cliCommandName();
   const output = [
     "Usage:",
-    `  ${command} ui [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
+    `  ${command} ui [--daemon] [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
     "",
     "Starts the background CCR service if needed and opens the management UI in the default browser.",
     "",
     "Options:",
+    "  --daemon         Run the management server in the background (default for ui).",
     "  --host <host>    Management server host. Defaults to CCR_WEB_HOST or 127.0.0.1.",
     "  --port <port>    Management server port. Defaults to CCR_WEB_PORT or 3458.",
     "  --open           Open the management page (default).",
@@ -781,11 +799,12 @@ function printWebHelp(exitCode: number): void {
   const command = cliCommandName();
   const output = [
     "Usage:",
-    `  ${command} serve [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
+    `  ${command} serve [--daemon] [--host <host>] [--port <port>] [--open|--no-open] [--gateway|--no-gateway]`,
     "",
-    `Runs in the foreground. ${command} web is an alias.`,
+    `Runs in the foreground by default. ${command} web is an alias.`,
     "",
     "Options:",
+    "  --daemon         Start the management server in the background instead of the foreground.",
     "  --host <host>    Management server host. Defaults to CCR_WEB_HOST or 127.0.0.1.",
     "  --port <port>    Management server port. Defaults to CCR_WEB_PORT or 3458.",
     "  --open           Open the management page in the default browser.",

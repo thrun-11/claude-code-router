@@ -318,6 +318,62 @@ test("RequestLogStore keeps list rows lightweight and detail rows complete", asy
   }
 });
 
+test("RequestLogStore persists stream experience metrics and derives authoritative TPS", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ccr-request-log-speed-test-"));
+  let store;
+  try {
+    store = new RequestLogStore(path.join(dir, "request-logs.sqlite"));
+    await store.record({
+      completedAt: new Date().toISOString(),
+      durationMs: 900,
+      method: "POST",
+      path: "/v1/messages",
+      providerName: "test-provider",
+      requestBody: Buffer.from(JSON.stringify({ messages: [], model: "test-model", stream: true })),
+      requestHeaders: { "content-type": "application/json" },
+      requestId: "request-log-speed-test",
+      responseBodyText: [
+        'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}',
+        "",
+        'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":21}}',
+        "",
+        'event: message_stop\ndata: {"type":"message_stop"}',
+        ""
+      ].join("\n"),
+      responseHeaders: { "content-type": "text/event-stream" },
+      startedAt: new Date().toISOString(),
+      statusCode: 200,
+      streamMetrics: {
+        activeOutputMs: 500,
+        estimatedOutputTokens: 19,
+        maxInterEventGapMs: 180,
+        p95InterEventGapMs: 120,
+        reasoningObserved: false,
+        responseHeadersMs: 100,
+        sampleStatus: "complete",
+        tailMs: 40,
+        textObserved: true,
+        timeToFirstSignalMs: 150,
+        timeToFirstTextMs: 170,
+        toolObserved: false,
+        upstreamTimeToFirstSignalMs: 80
+      },
+      url: "http://127.0.0.1:3456/v1/messages"
+    });
+
+    const entry = (await store.list({ pageSize: 25 })).items[0];
+    assert.equal(entry.outputTokens, 21);
+    assert.equal(entry.outputTokensPerSecond, 40);
+    assert.equal(entry.timeToFirstSignalMs, 150);
+    assert.equal(entry.timeToFirstTextMs, 170);
+    assert.equal(entry.maxInterEventGapMs, 180);
+    assert.equal(entry.streamSpeedSampleStatus, "complete");
+  } finally {
+    await store?.close();
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
 test("RequestLogStore keeps large request bodies in sidecar storage and reads them by chunk", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "ccr-request-log-sidecar-test-"));
   let store;
@@ -640,6 +696,51 @@ test("RequestLogStore redacts secrets and records CCR metadata", async () => {
   }
 });
 
+test("#1791 RequestLogStore records DeepSeek-native prompt cache hits", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ccr-request-log-deepseek-cache-test-"));
+  let store;
+  try {
+    store = new RequestLogStore(path.join(dir, "request-logs.sqlite"));
+    const startedAt = new Date().toISOString();
+    await store.record({
+      completedAt: startedAt,
+      durationMs: 75,
+      method: "POST",
+      path: "/v1/messages",
+      providerName: "OpenCode Go",
+      providerProtocol: "openai_chat_completions",
+      requestBody: Buffer.from(JSON.stringify({ model: "deepseek-v4.1-flash" }), "utf8"),
+      requestHeaders: { "content-type": "application/json" },
+      requestId: "request-log-deepseek-cache",
+      responseBodyText: JSON.stringify({
+        model: "deepseek-v4.1-flash",
+        usage: {
+          completion_tokens: 10,
+          prompt_cache_hit_tokens: 800,
+          prompt_cache_miss_tokens: 200,
+          prompt_tokens: 1000,
+          prompt_tokens_details: {},
+          total_tokens: 1010
+        }
+      }),
+      responseHeaders: { "content-type": "application/json" },
+      startedAt,
+      statusCode: 200,
+      url: "http://127.0.0.1:3456/v1/messages"
+    });
+
+    const page = await store.list({ pageSize: 25 });
+    const detail = await store.getDetail({ id: page.items[0].id });
+    assert.equal(detail?.inputTokens, 200);
+    assert.equal(detail?.cacheReadTokens, 800);
+    assert.equal(detail?.outputTokens, 10);
+    assert.equal(detail?.totalTokens, 1010);
+  } finally {
+    await store?.close();
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
 test("RequestLogStore marks interrupted successful-status streams as errors", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "ccr-request-log-interrupted-stream-test-"));
   let store;
@@ -868,6 +969,67 @@ test("RequestLogStore consumes fallback bundles by unique bundle id and only fin
     } finally {
       database.close();
     }
+  } finally {
+    await store.close();
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("RequestLogStore preserves gateway x-ccr-fallback-attempts across raw-trace updates", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ccr-request-log-preserve-fallback-attempts-test-"));
+  const store = new RequestLogStore(path.join(dir, "request-logs.sqlite"));
+  const startedAt = new Date().toISOString();
+  try {
+    // The gateway inserts the authoritative merged response headers, including
+    // x-ccr-fallback-attempts which powers the R{n} retry badge on the log page.
+    await store.record({
+      completedAt: startedAt,
+      durationMs: 25,
+      method: "POST",
+      path: "/v1/messages",
+      providerName: "gateway-provider",
+      requestBody: Buffer.from('{"model":"gateway-model"}'),
+      requestHeaders: { "content-type": "application/json" },
+      requestId: "preserve-fallback-attempts",
+      responseBodyText: "gateway-body",
+      responseHeaders: {
+        "content-type": "application/json",
+        "x-ccr-fallback-attempts": "2"
+      },
+      startedAt,
+      statusCode: 200,
+      url: "http://127.0.0.1:3456/v1/messages"
+    });
+
+    // A final-attempt raw-trace update carrying a non-empty upstream header set
+    // that lacks the gateway header must not clobber the stored headers.
+    const appliedNonEmpty = await store.updateFromRawTrace({
+      attempt: 2,
+      requestId: "preserve-fallback-attempts",
+      responseBodyText: "final-success-body",
+      responseHeaders: { "content-type": "application/json" },
+      statusCode: 200
+    });
+    // An empty upstream header set must also not wipe them to "{}".
+    const appliedEmpty = await store.updateFromRawTrace({
+      attempt: 2,
+      requestId: "preserve-fallback-attempts",
+      responseBodyText: "final-success-body-2",
+      responseHeaders: {},
+      statusCode: 200
+    });
+
+    assert.equal(appliedNonEmpty, true);
+    assert.equal(appliedEmpty, true);
+
+    const page = await store.list({ pageSize: 25 });
+    const detail = await store.getDetail({
+      id: page.items.find((item) => item.requestId === "preserve-fallback-attempts").id
+    });
+    // The gateway fallback marker survives both raw-trace updates.
+    assert.equal(detail.responseHeaders["x-ccr-fallback-attempts"], "2");
+    // The raw-trace updates still applied (body refined), so this is not a no-op.
+    assert.equal(detail.responseBody.text, "final-success-body-2");
   } finally {
     await store.close();
     rmSync(dir, { force: true, recursive: true });
@@ -2034,4 +2196,20 @@ test("RequestLogStore does not identify an unknown client as OpenCode from its m
     await store?.close();
     rmSync(dir, { force: true, recursive: true });
   }
+});
+
+test("#1801 unknown raw trace status is neutral while transport and HTTP errors remain failures", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ccr-log-outcome-"));
+  const store = new RequestLogStore(path.join(dir, "logs.sqlite"));
+  try {
+    for (const [requestId, statusCode, error] of [["unknown", 0, undefined], ["success", 200, undefined], ["http-error", 500, undefined], ["transport-error", 0, "connection reset"]]) {
+      const now = new Date().toISOString();
+      await store.record({ completedAt: now, startedAt: now, durationMs: 1, error, method: "POST", path: "/v1/messages", requestId, statusCode, url: "/v1/messages", requestHeaders: {}, responseHeaders: {}, requestBody: Buffer.from("{}"), responseBodyText: "{}" });
+    }
+    const errors = await store.list({ status: "error" });
+    assert.deepEqual(errors.items.map(item => item.requestId).sort(), ["http-error", "transport-error"]);
+    const analysis = await store.analyze({ range: "30d" });
+    assert.equal(analysis.totals.errorCount, 2);
+    assert.equal(analysis.totals.successRate, 1 / 3);
+  } finally { await store.close(); rmSync(dir, { recursive: true, force: true }); }
 });

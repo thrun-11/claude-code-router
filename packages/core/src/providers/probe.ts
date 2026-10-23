@@ -13,7 +13,10 @@ import type {
   GatewayProviderProtocol
 } from "@ccr/core/contracts/app";
 import { codexDefaultBaseUrl, readCodexAuth } from "@ccr/core/agents/local-providers/codex";
+import { opencodeCatalogProtocolModelMap } from "@ccr/core/agents/local-providers/opencode";
 import { localAgentProviderApiKey } from "@ccr/core/agents/local-providers/shared";
+import { readClaudeCodeOauth } from "@ccr/core/agents/local-providers/service";
+import { isLocalClaudeCodeOauthProviderPlugin, mergeAnthropicBetaValues } from "@ccr/core/providers/oauth-plugin";
 import { findProviderPresetByBaseUrl, providerApiKeySafetyIssue } from "@ccr/core/providers/presets/index";
 import { getProviderCatalogModels } from "@ccr/core/providers/model-catalog";
 import { fetchWithSystemProxy } from "@ccr/core/proxy/system-proxy-fetch";
@@ -350,13 +353,25 @@ async function resolveGatewayProviderProbe(request: GatewayProviderProbeRequest)
   const modelProbe = mode !== "models" || request.skipModelDiscovery
     ? { models: [] }
     : await probeModels(parsed, request.apiKey, protocols, request.providerPlugins ?? []);
-  const models = (mode === "connectivity" || mode === "models") && modelProbe.models.length > 0
-    ? modelProbe.models
+  const openCodeProtocolModelMap = modelProbe.models.length > 0
+    ? opencodeCatalogProtocolModelMap(request.baseUrl, protocols)
+    : undefined;
+  const openCodeProtocolModels = openCodeProtocolModelMap
+    ? uniqueStrings(Object.values(openCodeProtocolModelMap).flatMap((models) => models ?? []))
+    : undefined;
+  const resolvedModelProbe = openCodeProtocolModels && openCodeProtocolModels.length > 0
+    ? { ...modelProbe, models: modelProbe.models.filter((model) => openCodeProtocolModels.includes(model)) }
+    : modelProbe;
+  const resolvedOpenCodeProtocolModelMap = openCodeProtocolModels && openCodeProtocolModels.length > 0
+    ? intersectProtocolModels(openCodeProtocolModelMap ?? {}, resolvedModelProbe.models)
+    : undefined;
+  const models = (mode === "connectivity" || mode === "models") && resolvedModelProbe.models.length > 0
+    ? resolvedModelProbe.models
     : typedModels;
   const protocolResults = await probeProtocols(parsed, request.apiKey, models, protocols, mode, request.providerPlugins ?? []);
-  const detectedProtocol = detectProtocol(parsed, protocolResults, modelProbe.source, protocols);
+  const detectedProtocol = detectProtocol(parsed, protocolResults, resolvedModelProbe.source, protocols);
   const normalizedBaseUrl = detectedProtocol
-    ? resolveProbeBaseUrl(parsed, detectedProtocol, protocolResults, modelProbe)
+    ? resolveProbeBaseUrl(parsed, detectedProtocol, protocolResults, resolvedModelProbe)
     : parsed.normalizedInputBaseUrl;
   const detectedProvider = detectProvider(protocolResults);
   const account = detectedProvider === "new-api" ? newApiKeyUsageAccountConfig(normalizedBaseUrl) : undefined;
@@ -368,17 +383,32 @@ async function resolveGatewayProviderProbe(request: GatewayProviderProbeRequest)
     catalogModelMetadata: catalog.modelMetadata,
     ...(detectedProvider ? { detectedProvider } : {}),
     detectedProtocol,
-    modelDisplayNames: modelProbe.modelDisplayNames,
-    modelSource: modelProbe.source,
-    models: modelProbe.models,
+    modelDisplayNames: resolvedModelProbe.modelDisplayNames,
+    modelSource: resolvedModelProbe.source,
+    models: resolvedModelProbe.models,
     normalizedBaseUrl,
+    ...(resolvedOpenCodeProtocolModelMap ? { protocolModels: resolvedOpenCodeProtocolModelMap } : {}),
     protocols: protocolResults
   };
+}
+
+function intersectProtocolModels(
+  protocolModels: Partial<Record<GatewayProviderCapabilityProtocol, string[]>>,
+  discoveredModels: string[]
+): Partial<Record<GatewayProviderCapabilityProtocol, string[]>> {
+  const discovered = new Set(discoveredModels);
+  return Object.fromEntries(
+    Object.entries(protocolModels).map(([protocol, models]) => [
+      protocol,
+      (models ?? []).filter((model) => discovered.has(model))
+    ])
+  );
 }
 
 function providerProbeCacheKey(request: GatewayProviderProbeRequest): string {
   return JSON.stringify({
     apiKeyHash: hashSensitiveValue(request.apiKey ?? ""),
+    localClaudeTokenHash: hashSensitiveValue(localClaudeProbeToken(request.apiKey, request.providerPlugins ?? []) ?? ""),
     baseUrl: request.baseUrl.trim(),
     mode: request.mode ?? "protocols",
     models: uniqueStrings(request.models ?? []),
@@ -472,7 +502,8 @@ function providerProbeCapabilities(
   ));
   const detectedCapabilities = mergeProviderCapabilities(probe.capabilities ?? [])
     .filter((capability) => allowedProtocols.has(capability.type));
-  const presetCapabilities = providerProbePresetCapabilities(candidate);
+  const presetCapabilities = providerProbePresetCapabilities(candidate)
+    .filter((preset) => !detectedCapabilities.some((detected) => detected.type === preset.type));
   return mergeProviderCapabilities(detectedCapabilities, presetCapabilities);
 }
 
@@ -665,7 +696,7 @@ async function probeProtocols(
     results.push(
       mode === "connectivity" && isChatProtocol(protocol)
         ? await probeProtocolConnectivity(parsed, apiKey, models, protocol, providerPlugins)
-        : await probeProtocolSupport(parsed, apiKey, protocol)
+        : await probeProtocolSupport(parsed, apiKey, protocol, providerPlugins)
     );
   }
 
@@ -675,14 +706,16 @@ async function probeProtocols(
 async function probeProtocolSupport(
   parsed: ParsedProviderUrl,
   apiKey: string | undefined,
-  protocol: GatewayProviderCapabilityProtocol
+  protocol: GatewayProviderCapabilityProtocol,
+  providerPlugins: unknown[] = []
 ): Promise<GatewayProviderProbeProtocolResult> {
   const endpoints = endpointsForProtocol(parsed, protocol, undefined);
   const endpoint = endpoints[0]?.endpoint ?? providerBaseUrlForCapability(parsed, protocol);
   let firstResult: GatewayProviderProbeProtocolResult | undefined;
 
   for (const candidate of endpoints) {
-    const result = await requestJson(candidate.endpoint, requestForProtocolSupport(protocol, apiKey));
+    const request = await providerProbeAuthRequest(candidate.endpoint, requestForProtocolSupport(protocol, apiKey), providerPlugins, apiKey, { model: "" });
+    const result = await requestJson(request.url, request.init);
     const message = readResponseMessage(result);
     const supported = isProviderProtocolEndpointSupportedForProbe(result.status, message, protocol, parsed.hints);
     const probeResult = {
@@ -932,7 +965,24 @@ async function providerProbeAuthRequest(
     request = providerProbeRequestTransformRequest(request.url, request.init, requestTransform, context);
   }
 
+  {
+    const token = localClaudeProbeToken(apiKey, providerPlugins);
+    if (token) {
+      const headers = new Headers(request.init.headers);
+      headers.set("authorization", `Bearer ${token}`);
+      headers.delete("x-api-key");
+      headers.set("anthropic-beta", mergeAnthropicBetaValues(headers.get("anthropic-beta") ?? undefined, "oauth-2025-04-20"));
+      request = { ...request, init: { ...request.init, headers } };
+    }
+  }
+
   return request;
+}
+
+function localClaudeProbeToken(apiKey: string | undefined, providerPlugins: unknown[]): string | undefined {
+  return apiKey === localAgentProviderApiKey && providerPlugins.some(isLocalClaudeCodeOauthProviderPlugin)
+    ? readClaudeCodeOauth()?.accessToken
+    : undefined;
 }
 
 function providerProbeLiveCodexOauth(

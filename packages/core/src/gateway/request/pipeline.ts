@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
-import type { ApiKeyConfig, AppConfig, ProfileConfig, RequestRouteTraceChange, RouterFallbackConfig } from "@ccr/core/contracts/app";
+import type { ApiKeyConfig, AppConfig, ProfileConfig, RequestRouteTraceChange, RequestStreamMetrics, RouterFallbackConfig } from "@ccr/core/contracts/app";
 import {
   createSseErrorDetector,
   markGatewayRequestLogDropped,
@@ -61,6 +61,7 @@ import {
   ccrRouterHttpRoutePath
 } from "@ccr/core/gateway/core-runtime/router-plugin-contract";
 import { isRecord } from "@ccr/core/gateway/internal/value";
+import { combineStreamExperienceMetrics, createStreamExperienceMeter, monotonicNowMs } from "@ccr/core/observability/stream-experience";
 
 export type GatewayRequestPipelineDependencies = {
   getBrowserWebSearchMcpIntegration: () => BrowserWebSearchMcpIntegration | undefined;
@@ -127,11 +128,12 @@ export class GatewayRequestPipeline {
       const activeConfig = this.config;
 
       const method = request.method ?? "GET";
-      const requestBody = await readRequestBody(request);
-      const requestedModel = requestLogRequestedModel(requestBody, path);
+      const requestStartedAtMonoMs = monotonicNowMs();
       const startedAt = Date.now();
       const startedAtIso = new Date(startedAt).toISOString();
       const requestId = randomUUID();
+      const requestBody = await readRequestBody(request);
+      const requestedModel = requestLogRequestedModel(requestBody, path);
       const requestUrl = new URL(request.url || path, this.status.endpoint || "http://127.0.0.1").toString();
       const routeTrace = shouldRecordRequestLogs(this.config)
         ? new RequestRouteTraceRecorder(startedAt)
@@ -259,6 +261,7 @@ export class GatewayRequestPipeline {
       let responseCompleted = false;
       let onClientDisconnect: (() => void) | undefined;
       let onResponseFinish: (() => void) | undefined;
+      let streamMetrics: RequestStreamMetrics | undefined;
       const handleClientDisconnect = () => {
         if (responseCompleted || response.writableEnded) {
           return;
@@ -328,6 +331,7 @@ export class GatewayRequestPipeline {
           requestId,
           resolvedModel: routedModel,
           routeTrace: routeTrace?.finish({ captureBodyValues: captureBody }),
+          streamMetrics,
           responseBodyText,
           responseBodySizeBytes,
           responseBodyTruncated,
@@ -396,6 +400,9 @@ export class GatewayRequestPipeline {
         routeFallback = routed.decision.fallback ?? routeFallback;
         routedSessionId = routed.decision.sessionId;
         routedTokenCount = routed.decision.tokenCount;
+        if (routedTokenCount === 0 && pluginService.hasGatewayRequestTransforms({ includeBuiltIns: false })) {
+          routedTokenCount = this.plugin.countTokens(routed.body).input_tokens;
+        }
         if (routed.decision.model) {
           headers[ccrRoutedModelHeader] = sanitizeHeaderValue(routed.decision.model);
           routedModel = routed.decision.model;
@@ -934,7 +941,7 @@ export class GatewayRequestPipeline {
           response.end();
           return;
         }
-        const outboundErrorText = appendAggregateErrorAttemptSummary(bufferedErrorText) ?? bufferedErrorText;
+        const outboundErrorText = appendAggregateErrorAttemptSummary(bufferedErrorText, upstreamResult.failedAttempts) ?? bufferedErrorText;
         if (outboundErrorText !== bufferedErrorText) {
           responseHeaders.delete("content-length");
         }
@@ -960,6 +967,7 @@ export class GatewayRequestPipeline {
         return;
       }
       response.writeHead(upstreamResponse.status, Object.fromEntries(filteredResponseHeaders(responseHeaders)));
+      const responseHeadersAtMonoMs = monotonicNowMs();
       if (!upstreamResponse.body) {
         finalizeOpenRouterDiscountSelection(upstreamResponse.ok);
         if (shouldCaptureUsage) {
@@ -982,7 +990,12 @@ export class GatewayRequestPipeline {
         return;
       }
 
-      const upstreamBody = Readable.fromWeb(upstreamResponse.body as unknown as import("node:stream/web").ReadableStream);
+      const upstreamBodySource = Readable.fromWeb(upstreamResponse.body as unknown as import("node:stream/web").ReadableStream);
+      const upstreamExperienceMeter = createStreamExperienceMeter({
+        contentType: contextArchiveSourceContentType,
+        protocol: responseProtocol
+      });
+      const upstreamBody = upstreamBodySource.pipe(upstreamExperienceMeter.stream);
       const patchedResponseBody = codexApplyPatchBridgeActive
         ? codexApplyPatchBridgeResponseStream(upstreamBody, responseHeaders)
         : upstreamBody;
@@ -1016,10 +1029,31 @@ export class GatewayRequestPipeline {
       const clientResponseBody = rewriteAnthropicResponseModel && clientVisibleResponseModel
         ? rewriteAnthropicMessageStartModelStream(responseBody, clientVisibleResponseModel)
         : responseBody;
-      const responseStreams = uniqueStreams([upstreamBody, patchedResponseBody, multiAgentResponseBody, hostedWebSearchResponseBody, responseBody, clientResponseBody]);
       const sampler = createBodySampler();
       const sseErrorDetector = createSseErrorDetector(responseHeaders.get("content-type") ?? undefined);
       let streamDetectedError: string | undefined;
+      const clientExperienceMeter = createStreamExperienceMeter({
+        contentType: responseHeaders.get("content-type") ?? undefined,
+        onChunk: (chunk) => {
+          sampler.append(chunk);
+          streamDetectedError ??= sseErrorDetector.append(chunk);
+        },
+        protocol: responseProtocol,
+        publishLiveRate: true,
+        requestId
+      });
+      const meteredClientResponseBody = clientResponseBody.pipe(clientExperienceMeter.stream);
+      const responseStreams = uniqueStreams([
+        upstreamBodySource,
+        upstreamExperienceMeter.stream,
+        upstreamBody,
+        patchedResponseBody,
+        multiAgentResponseBody,
+        hostedWebSearchResponseBody,
+        responseBody,
+        clientResponseBody,
+        meteredClientResponseBody
+      ]);
       let upstreamStreamEnded = false;
       let logRecorded = false;
       const writeStreamLog = (error?: string) => {
@@ -1034,6 +1068,18 @@ export class GatewayRequestPipeline {
           terminalEventSeen: sseErrorDetector.hasTerminalEvent(),
           upstreamStatus: upstreamResponse.status
         });
+        const clientExperience = clientExperienceMeter.snapshot();
+        const upstreamExperience = upstreamExperienceMeter.snapshot();
+        streamMetrics = clientExperience.active || upstreamExperience.active
+          ? combineStreamExperienceMetrics({
+              client: clientExperience,
+              requestStartedAtMs: requestStartedAtMonoMs,
+              responseHeadersAtMs: responseHeadersAtMonoMs,
+              sampleStatus: outcome.error ? "partial" : "complete",
+              upstream: upstreamExperience,
+              upstreamAttemptStartedAtMs: upstreamResult.timing.attemptStartedAtMonoMs
+            })
+          : undefined;
         finalizeOpenRouterDiscountSelection(outcome.statusCode >= 200 && outcome.statusCode < 400 && !outcome.error);
         writeRequestLog(
           outcome.statusCode,
@@ -1045,9 +1091,11 @@ export class GatewayRequestPipeline {
         );
       };
       onClientDisconnect = () => {
+        upstreamExperienceMeter.finish();
+        clientExperienceMeter.finish();
         streamDetectedError ??= sseErrorDetector.finish();
         writeStreamLog();
-        clientResponseBody.unpipe(response);
+        meteredClientResponseBody.unpipe(response);
         destroyResponseStreams(responseStreams);
       };
       onResponseFinish = () => {
@@ -1057,6 +1105,8 @@ export class GatewayRequestPipeline {
       };
       const onResponseStreamError = (error: Error) => {
         failContextArchiveRequest(contextArchiveRecord, contextArchiveRequestConfig);
+        upstreamExperienceMeter.finish();
+        clientExperienceMeter.finish();
         streamDetectedError ??= sseErrorDetector.finish();
         writeStreamLog(clientDisconnected ? clientDisconnectMessage : formatUpstreamErrorForLog(error, {
           attempts: upstreamResult.failedAttempts.length + 1,
@@ -1069,15 +1119,17 @@ export class GatewayRequestPipeline {
             0
           )
         }));
+        // .pipe() does not end the client response when a stage errors, so an
+        // upstream reset would leave the client waiting forever. Headers are
+        // already sent; closing the socket is how a truncated stream fails.
+        if (!response.destroyed) {
+          response.destroy();
+        }
       };
       for (const stream of responseStreams) {
         stream.on("error", onResponseStreamError);
       }
-      clientResponseBody.on("data", (chunk) => {
-        sampler.append(chunk);
-        streamDetectedError ??= sseErrorDetector.append(chunk);
-      });
-      clientResponseBody.once("end", () => {
+      meteredClientResponseBody.once("end", () => {
         upstreamStreamEnded = true;
         streamDetectedError ??= sseErrorDetector.finish();
         if (responseCompleted || response.writableEnded) {
@@ -1085,7 +1137,7 @@ export class GatewayRequestPipeline {
         }
       });
       if (shouldCaptureUsage) {
-        clientResponseBody.once("end", () => {
+        meteredClientResponseBody.once("end", () => {
           recordUsage({
             bodyText: sampler.read(),
             client,
@@ -1105,7 +1157,7 @@ export class GatewayRequestPipeline {
         onClientDisconnect();
         return;
       }
-      clientResponseBody.pipe(response);
+      meteredClientResponseBody.pipe(response);
     }
 
   async replayContextArchive(input: ContextArchiveReplayInput): Promise<ContextArchiveReplayResult> {

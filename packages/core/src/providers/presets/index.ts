@@ -12,6 +12,7 @@ import { minimaxChinaProviderPreset, minimaxGlobalProviderPreset } from "@ccr/co
 import { mistralProviderPreset } from "@ccr/core/providers/presets/mistral/index";
 import { moonshotChinaProviderPreset, moonshotGlobalProviderPreset } from "@ccr/core/providers/presets/moonshot/index";
 import { nvidiaProviderPreset } from "@ccr/core/providers/presets/nvidia/index";
+import { openCodeGoProviderPreset } from "@ccr/core/providers/presets/opencode-go/index";
 import { openaiProviderPreset } from "@ccr/core/providers/presets/openai/index";
 import { openRouterProviderPreset } from "@ccr/core/providers/presets/openrouter/index";
 import { qiniuAiProviderPreset } from "@ccr/core/providers/presets/qiniu-ai/index";
@@ -25,6 +26,7 @@ import {
   xiaomiMimoTokenPlanEuropeProviderPreset,
   xiaomiMimoTokenPlanSingaporeProviderPreset
 } from "@ccr/core/providers/presets/xiaomi/index";
+import { yApiProviderPreset } from "@ccr/core/providers/presets/y-api/index";
 import { zaiGlobalCodingProviderPreset } from "@ccr/core/providers/presets/zai-global-coding/index";
 import { zaiGlobalGeneralProviderPreset } from "@ccr/core/providers/presets/zai-global-general/index";
 import { zhipuCnCodingProviderPreset } from "@ccr/core/providers/presets/zhipu-cn-coding/index";
@@ -46,6 +48,7 @@ export const providerPresets: ProviderPreset[] = [
   geminiProviderPreset,
   openRouterProviderPreset,
   nvidiaProviderPreset,
+  openCodeGoProviderPreset,
   deepSeekProviderPreset,
   xiaomiMimoProviderPreset,
   xiaomiMimoTokenPlanChinaProviderPreset,
@@ -71,7 +74,8 @@ export const providerPresets: ProviderPreset[] = [
   teamoRouterProviderPreset,
   unity2ProviderPreset,
   code0ProviderPreset,
-  claudeApiProviderPreset
+  claudeApiProviderPreset,
+  yApiProviderPreset
 ];
 
 export function getProviderPresets(): ProviderPreset[] {

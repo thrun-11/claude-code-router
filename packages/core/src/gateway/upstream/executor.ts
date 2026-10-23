@@ -16,6 +16,7 @@ import { isLocalClaudeCodeOauthProviderPlugin, mergeAnthropicBetaValues } from "
 import { abortSignalMessage, formatError, omitLocalObservabilityHeaders, shouldSendBody, withCoreGatewayAuthHeader } from "@ccr/core/gateway/http/io";
 import { parseJsonObjectSafe, releaseJsonObject, serializeJsonBody, serializeJsonBodyWithModel } from "@ccr/core/gateway/http/body";
 import { resolveGatewayPublicModelId } from "@ccr/core/gateway/features/model-discovery";
+import { ccrRoutedModelHeader } from "@ccr/core/gateway/core-runtime/router-plugin-contract";
 import { activeProviderCredentials, findProviderByPublicOrInternalName, findProviderCredentialBySlug, normalizedProviderCapabilities, parseProviderCredentialInternalName, providerCapabilityForClientProtocol, providerCapabilityInternalName, providerCapabilityNameMatches, providerCredentialInternalName, providerCredentialPriority, providerCredentialRuntimeId, providerCredentialSlug, providerProtocolForClientProtocol, sanitizeHeaderValue } from "@ccr/core/providers/runtime-topology";
 import { delay } from "@ccr/core/gateway/internal/clock";
 import { executeTransformerAttempt } from "@ccr/core/transformer/bridge/transformer-attempt";
@@ -23,6 +24,7 @@ import { retryDelayAfterNetworkError, retryDelayAfterStatus, shouldFallbackAfter
 import { claudeCodeOauthBetaHeader, claudeCodeOauthRequiredBeta, UpstreamRequestError } from "@ccr/core/gateway/internal/shared";
 import type { ApiKeyLimitUsage, ProviderCredentialRoutingTarget, UpstreamAttempt, UpstreamFailedAttempt, UpstreamFetchResult } from "@ccr/core/gateway/internal/shared";
 import type { RouteTraceObserver } from "@ccr/core/observability/route-trace";
+import { monotonicNowMs } from "@ccr/core/observability/stream-experience";
 
 const providerCredentialSpilloverThreshold = 0.8;
 const openRouterDiscountModelHeader = "x-ccr-openrouter-discount-model";
@@ -279,6 +281,14 @@ export function rewriteCapabilityResponseHeaders(headers: Headers, config: AppCo
 }
 
 
+function routedModelHeaderForAttempt(attempt: UpstreamAttempt): string | undefined {
+  if (attempt.target?.kind === "provider") {
+    const provider = firstTargetProviderHeader(attempt.headers ?? {}) ?? providerRuntimeId(attempt.target.provider);
+    return `${provider}/${attempt.target.model}`;
+  }
+  return attempt.target?.canonicalSelector ?? normalizeRouteSelector(attempt.model);
+}
+
 export async function fetchUpstreamWithFallback(input: {
   body?: Buffer;
   config: AppConfig;
@@ -416,6 +426,16 @@ export async function fetchUpstreamWithFallback(input: {
       method: input.method,
       path: input.path
     });
+    if (index > 0) {
+      const headers = { ...attempt.headers };
+      const attemptRoutedModel = routedModelHeaderForAttempt(attempt);
+      if (attemptRoutedModel) {
+        headers[ccrRoutedModelHeader] = sanitizeHeaderValue(attemptRoutedModel);
+      } else {
+        delete headers[ccrRoutedModelHeader];
+      }
+      attempt.headers = headers;
+    }
     const hasNextAttempt = index < attempts.length - 1;
     const attemptUrl = rewriteRouteModelInUrl(input.upstreamUrl, attempt.model);
     const upstreamHeaders = {
@@ -433,6 +453,7 @@ export async function fetchUpstreamWithFallback(input: {
     );
     const transformerProvider = resolveTransformerProviderForAttempt(input.config, attempt, attemptHeaders);
     const attemptStartedAt = Date.now();
+    const attemptStartedAtMonoMs = monotonicNowMs();
     input.trace?.capture({
       attempt: attemptNumber,
       changes: [
@@ -448,8 +469,9 @@ export async function fetchUpstreamWithFallback(input: {
           : []),
         ...(attemptUrl !== input.upstreamUrl
           ? [{ after: attemptUrl, before: input.upstreamUrl, operation: "replace" as const, path: "/url", scope: "url" as const }]
-          : [])
-      ],
+          : []),
+        routeTraceChange("headers", `/headers/${ccrRoutedModelHeader}`, input.headers[ccrRoutedModelHeader], attempt.headers?.[ccrRoutedModelHeader])
+      ].filter(isRouteTraceChange),
       durationMs: attemptStartedAt - attemptPreparationStartedAt,
       kind: "attempt",
       name: "upstream.attempt.prepare",
@@ -543,7 +565,10 @@ export async function fetchUpstreamWithFallback(input: {
       return {
         attempt,
         failedAttempts,
-        response
+        response,
+        timing: {
+          attemptStartedAtMonoMs
+        }
       };
     } catch (error) {
       const message = formatError(error);

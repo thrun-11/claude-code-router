@@ -86,3 +86,5 @@ With a Bot bound and ChatGPT opened from CCR, ChatGPT can relay conversations th
 - **ChatGPT keeps asking to sign in:** sign in to ChatGPT normally, then reopen it from CCR.
 - **Provider ID rejected:** use only letters, numbers, dots, underscores, or hyphens, and keep it stable across saves.
 - **Wrong model in the app:** confirm the **Codex model** field; if left empty, CCR falls back to the first available default model.
+- **The app says application network requirements are missing:** update CCR and reopen the app. CCR explicitly declares that this entry point needs no additional application network domains.
+- **A task stays read-only after you allow a write:** sandbox mode and approval routing are separate settings; typing “allow writing” in chat does not change the sandbox. Select **Workspace write** in the task permissions. CCR preserves the approval reviewer selected in the Codex app; **Approve for me** changes who reviews eligible approval requests but does not widen the sandbox.
