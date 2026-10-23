@@ -1,5 +1,6 @@
 import {
   DEFAULT_OVERVIEW_WIDGETS,
+  LEGACY_DEFAULT_OVERVIEW_WIDGETS,
   DEFAULT_TRAY_COMPONENT_VARIANTS,
   DEFAULT_TRAY_WINDOW_MODULES,
   OVERVIEW_WIDGET_SIZE_VALUES,
@@ -181,11 +182,22 @@ export function normalizeTrayWidget(value: unknown): TrayWidgetConfig | undefine
     return undefined;
   }
   const variant = normalizeTrayWidgetVariant(type, value.variant);
+  const accountProviders = type === "account" ? normalizeTrayWidgetAccountProviders(value) : [];
   return {
+    ...(accountProviders.length === 1 ? { accountProvider: accountProviders[0] } : {}),
+    ...(accountProviders.length > 0 ? { accountProviders } : {}),
     id: stringValue(value.id) || trayWidgetId(type),
     type,
     ...(variant ? { variant } : {})
   };
+}
+
+export function normalizeTrayWidgetAccountProviders(value: Record<string, unknown>): string[] {
+  const accountProvider = stringValue(value.accountProvider);
+  return uniqueStrings([
+    ...overviewAccountProviderListValue(value.accountProviders),
+    ...(accountProvider ? [accountProvider] : [])
+  ]);
 }
 
 export function normalizeTrayWidgetType(value: unknown): TrayWidgetType | undefined {
@@ -321,6 +333,10 @@ export function normalizeOverviewWidgets(value: unknown): OverviewWidgetConfig[]
   const widgets = value
     .map(normalizeOverviewWidget)
     .filter((widget): widget is OverviewWidgetConfig => Boolean(widget));
+  // Only upgrade the untouched old default; preserve every customized layout.
+  if (JSON.stringify(widgets) === JSON.stringify(LEGACY_DEFAULT_OVERVIEW_WIDGETS.map(normalizeOverviewWidget))) {
+    return DEFAULT_OVERVIEW_WIDGETS.map((widget) => ({ ...widget }));
+  }
   return widgets;
 }
 

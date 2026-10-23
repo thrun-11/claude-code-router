@@ -516,7 +516,9 @@ export async function fetchUpstreamWithFallback(input: {
           statusCode: response.status
         });
         recordProviderCredentialOutcome(input.config, input.method, attempt, response.status, response.headers);
-        await drainResponseBody(response);
+        // Failed response bodies may never finish. Start cancellation without
+        // waiting for upstream cleanup before trying the next provider.
+        void cancelResponseBody(response);
         if (delayMs > 0) {
           await delay(delayMs, input.signal);
         }
@@ -822,6 +824,9 @@ function usageAwareOpenAiChatAttemptBody(input: {
       : undefined
   );
   if (providerProtocol !== "openai_chat_completions" && providerProtocol !== "openai_responses") {
+    return input.body;
+  }
+  if (providerProtocol === "openai_responses" && clientProtocol === "openai_responses") {
     return input.body;
   }
   const sanitizedBody = stripUnsupportedOpenAiRequestParameters(input.body);
@@ -1194,20 +1199,11 @@ function isRouteTraceChange(value: RequestRouteTraceChange | undefined): value i
 }
 
 
-async function drainResponseBody(response: Response): Promise<void> {
-  try {
-    await response.arrayBuffer();
-  } catch {
-    // The failed attempt is already being skipped; body drain errors should not block the next attempt.
-  }
-}
-
-
 export async function cancelResponseBody(response: Response): Promise<void> {
   try {
     await response.body?.cancel();
   } catch {
-    // The client already disconnected; best-effort upstream cleanup must not mask that expected path.
+    // Cleanup after a failed attempt or client disconnect must not mask the original outcome.
   }
 }
 

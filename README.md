@@ -169,28 +169,28 @@ CCR supports OpenAI Chat / Responses, Anthropic Messages, Gemini Generate Conten
    <table width="100%">
      <tr>
        <td align="center" width="330">
-         <a href="https://github.com/musistudio/claude-code-router/releases/download/v3.0.22/Claude-Code-Router_3.0.22.exe">
+         <a href="https://github.com/musistudio/claude-code-router/releases/download/v3.1.0/Claude-Code-Router_3.1.0.exe">
            <img src="/docs/public/platform-icons/windows.png" width="44" height="44" alt="Windows logo" />
            <br />
            <strong>Windows</strong>
          </a>
        </td>
        <td align="center" width="330">
-         <a href="https://github.com/musistudio/claude-code-router/releases/download/v3.0.22/Claude-Code-Router_3.0.22.AppImage">
+         <a href="https://github.com/musistudio/claude-code-router/releases/download/v3.1.0/Claude-Code-Router_3.1.0.AppImage">
            <img src="/docs/public/platform-icons/linux.png" width="44" height="44" alt="Linux logo" />
            <br />
            <strong>Linux</strong>
          </a>
        </td>
        <td align="center" width="330">
-         <a href="https://github.com/musistudio/claude-code-router/releases/download/v3.0.22/Claude-Code-Router_3.0.22-mac-Apple-Silicon-arm64.dmg">
+         <a href="https://github.com/musistudio/claude-code-router/releases/download/v3.1.0/Claude-Code-Router_3.1.0-mac-Apple-Silicon-arm64.dmg">
            <img src="/docs/public/platform-icons/macos.png" width="44" height="44" alt="macOS logo" />
            <br />
            <strong>macOS (Apple Silicon)</strong>
          </a>
        </td>
        <td align="center" width="330">
-         <a href="https://github.com/musistudio/claude-code-router/releases/download/v3.0.22/Claude-Code-Router_3.0.22-mac-Intel-x64.dmg">
+         <a href="https://github.com/musistudio/claude-code-router/releases/download/v3.1.0/Claude-Code-Router_3.1.0-mac-Intel-x64.dmg">
            <img src="/docs/public/platform-icons/macos.png" width="44" height="44" alt="macOS logo" />
            <br />
            <strong>macOS (Intel)</strong>
@@ -224,10 +224,10 @@ Open `http://127.0.0.1:3458`, then follow the same **Providers → Server → Ag
 ### Docker
 
 ```sh
-docker compose up -d --build
+npm run docker:compose:up
 ```
 
-Docker exposes the management UI and gateway routes through `http://127.0.0.1:3458` by default. Read the [Docker deployment guide](https://ccrdesk.top/en/guides/docker/) before exposing CCR remotely.
+Docker exposes the management UI and gateway routes through `http://127.0.0.1:3458` by default. The npm script prepares the local plugin-capable ai-gateway runtime before building the image when `../../next-ai/gateway` exists. Read the [Docker deployment guide](https://ccrdesk.top/en/guides/docker/) before exposing CCR remotely.
 
 ## Build desktop apps
 

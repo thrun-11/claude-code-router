@@ -11,6 +11,9 @@ const testRoot = path.join(
 process.env.CCR_INTERNAL_HOME_DIR = path.join(testRoot, "home");
 process.env.CCR_INTERNAL_APP_DATA_DIR = path.join(testRoot, "app-data");
 process.env.CCR_INTERNAL_USER_DATA_DIR = path.join(testRoot, "user-data");
+if (process.platform === "win32") {
+  process.env.LOCALAPPDATA = path.join(testRoot, "local-app-data");
+}
 
 async function loadModules() {
   const {
@@ -41,8 +44,8 @@ test("sync skips and restores the backup when no enabled claude-code profile ope
   assert.equal(synced.result.message, NO_CLAUDE_APP_ENTRY_PROFILE_MESSAGE);
   assert.equal(existsSync(BACKUP_FILE), false);
   const libraryConfig = JSON.parse(readFileSync(claudeAppPaths().configLibraryFile, "utf8"));
-  assert.equal(libraryConfig.inferenceProvider, "original");
-  assert.equal(readFileSync(claudeAppPaths().rootConfigFile, "utf8"), '{"deploymentMode":"native"}');
+  assert.equal(libraryConfig.inferenceProvider, "gateway");
+  assert.equal(JSON.parse(readFileSync(claudeAppPaths().rootConfigFile, "utf8")).deploymentMode, "native");
   cleanup(BACKUP_FILE);
 });
 
@@ -133,6 +136,25 @@ test("sync applies the gateway config regardless of profile scope", async () => 
   }
 });
 
+test("sync persists a generated Claude App credential through the credential store", async () => {
+  const { BACKUP_FILE, syncClaudeAppGatewayConfig } = await loadModules();
+  const { createDefaultAppConfig } = await import("@ccr/core/config/default-config.ts");
+  const { loadPersistedApiKeys } = await import("@ccr/core/config/config-repository.ts");
+  const config = createDefaultAppConfig();
+  config.Providers = [{ name: "test-provider", models: ["test-model"], api_base_url: "https://example.test/v1" }];
+  config.profile.profiles = [claudeCodeProfile({ surface: "app" })];
+  try {
+    const synced = await syncClaudeAppGatewayConfig(config);
+    assert.equal(synced.result.apiKeyGenerated, true);
+    const libraryConfig = JSON.parse(readFileSync(claudeAppPaths().configLibraryFile, "utf8"));
+    const keys = await loadPersistedApiKeys();
+    assert.ok(keys.some((key) => key.key === libraryConfig.inferenceGatewayApiKey));
+    assert.ok(synced.config.APIKEYS.some((key) => key.key === libraryConfig.inferenceGatewayApiKey));
+  } finally {
+    cleanup(BACKUP_FILE);
+  }
+});
+
 function claudeCodeProfile(overrides = {}) {
   return {
     agent: "claude-code",
@@ -145,7 +167,11 @@ function claudeCodeProfile(overrides = {}) {
 }
 
 function claudeAppPaths() {
-  const dataDir = path.join(testRoot, "app-data", "Claude-3p");
+  const dataDir = process.platform === "darwin"
+    ? path.join(testRoot, "home", "Library", "Application Support", "Claude-3p")
+    : process.platform === "win32"
+      ? path.join(testRoot, "local-app-data", "Claude-3p")
+      : path.join(testRoot, "app-data", "Claude-3p");
   return {
     configLibraryFile: path.join(dataDir, "configLibrary", "8f69f2f1-3275-4ad8-9317-4aa7e972f311.json"),
     dataDir,
@@ -155,6 +181,7 @@ function claudeAppPaths() {
 }
 
 function seedGatewayBackup(backupFile) {
+  writeJsonFile(claudeAppPaths().configLibraryFile, { inferenceProvider: "gateway" });
   writeJsonFile(backupFile, {
     configLibraryFile: { content: '{"inferenceProvider":"original"}', exists: true },
     createdAt: "2026-01-01T00:00:00.000Z",
@@ -163,6 +190,50 @@ function seedGatewayBackup(backupFile) {
     version: 1
   });
 }
+
+test("#1768 restore preserves live library, root preferences and metadata across restarts", async () => {
+  const { BACKUP_FILE, syncClaudeAppGatewayConfig } = await loadModules();
+  const paths = claudeAppPaths();
+  const enabled = createConfig({ profile: { profiles: [claudeCodeProfile({ surface: "app" })] } });
+  try {
+    writeJsonFile(paths.rootConfigFile, { deploymentMode: "native", preference: false });
+    writeJsonFile(paths.metaFile, { appliedId: "original", entries: [{ id: "original", name: "Original" }] });
+    for (let cycle = 0; cycle < 2; cycle++) {
+      await syncClaudeAppGatewayConfig(enabled);
+      const read = (file) => JSON.parse(readFileSync(file, "utf8"));
+      writeJsonFile(paths.configLibraryFile, { ...read(paths.configLibraryFile), chatTabEnabled: true, coworkEgressAllowedHosts: ["example.test"] });
+      writeJsonFile(paths.rootConfigFile, { ...read(paths.rootConfigFile), preference: true });
+      const meta = read(paths.metaFile);
+      writeJsonFile(paths.metaFile, { ...meta, userPreference: true, entries: [...meta.entries, { id: `new-${cycle}`, name: "New" }] });
+      await syncClaudeAppGatewayConfig(createConfig());
+      assert.equal(read(paths.rootConfigFile).deploymentMode, "native");
+      assert.equal(read(paths.rootConfigFile).preference, true);
+      assert.equal(read(paths.configLibraryFile).chatTabEnabled, true);
+      assert.deepEqual(read(paths.configLibraryFile).coworkEgressAllowedHosts, ["example.test"]);
+      assert.equal(read(paths.metaFile).appliedId, "original");
+      assert.equal(read(paths.metaFile).userPreference, true);
+      assert.ok(read(paths.metaFile).entries.some((entry) => entry.id === `new-${cycle}`));
+      assert.equal(existsSync(BACKUP_FILE), false);
+    }
+  } finally {
+    cleanup(BACKUP_FILE);
+  }
+});
+
+test("#1768 restore removes absent takeover keys while preserving newly created preferences", async () => {
+  const { BACKUP_FILE, syncClaudeAppGatewayConfig } = await loadModules();
+  const paths = claudeAppPaths();
+  try {
+    await syncClaudeAppGatewayConfig(createConfig({ profile: { profiles: [claudeCodeProfile()] } }));
+    writeJsonFile(paths.rootConfigFile, { deploymentMode: "3p", userPreference: true });
+    await syncClaudeAppGatewayConfig(createConfig());
+    assert.deepEqual(JSON.parse(readFileSync(paths.rootConfigFile, "utf8")), { userPreference: true });
+    assert.equal(JSON.parse(readFileSync(paths.metaFile, "utf8")).appliedId, undefined);
+    assert.equal(existsSync(paths.configLibraryFile), true);
+  } finally {
+    cleanup(BACKUP_FILE);
+  }
+});
 
 function seedGatewayBackupWithoutExistingFiles(backupFile) {
   writeJsonFile(backupFile, {

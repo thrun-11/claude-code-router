@@ -83,6 +83,7 @@ import type {
   RouteScriptValidationResult,
   UsageStatsFilter,
   UsageStatsRange,
+  UsageStatsResetResult,
   UsageStatsSnapshot
 } from "@ccr/core/contracts/app";
 import type { ProviderPreset } from "@ccr/core/providers/presets/types";
@@ -142,9 +143,11 @@ declare global {
       revealProxyCertificate: () => Promise<void>;
       renderHtmlPng?: (request: AppRenderHtmlPngRequest) => Promise<AppRenderHtmlPngResult>;
       resetCodexRateLimitCredit: (request: ProviderAccountResetRequest) => Promise<ProviderAccountResetResult>;
+      resetOverviewStatistics: () => Promise<UsageStatsResetResult>;
       restartGateway: () => Promise<GatewayStatus>;
       restartProxy: () => Promise<ProxyStatus>;
       saveApiKeys: (apiKeys: ApiKeyConfig[]) => Promise<AppConfig>;
+      /** Saves settings while preserving the credentials managed by saveApiKeys. */
       saveConfig: (config: AppConfig, options?: AppSaveConfigOptions) => Promise<AppConfig>;
       selectPluginDirectory: () => Promise<PluginDirectorySelection | undefined>;
       setOnboardingFinished: () => Promise<boolean>;

@@ -888,6 +888,7 @@ export const GATEWAY_PLUGIN_PERMISSION_IDS = [
   "provider-account-connectors",
   "gateway-request-transforms",
   "core-gateway-config",
+  "core-gateway-plugins",
   "core-provider-plugins",
   "virtual-model-profiles",
   "sqlite-store",
@@ -1219,6 +1220,7 @@ export type GatewayPluginConfig = {
   config?: unknown;
   coreGateway?: {
     config?: Record<string, unknown>;
+    plugins?: unknown[];
     providerPlugins?: unknown[];
     virtualModelProfiles?: VirtualModelProfileConfig[];
   };
@@ -1408,7 +1410,7 @@ export type OverviewWidgetConfig = {
   variant: OverviewWidgetVariant;
 };
 
-export const DEFAULT_OVERVIEW_WIDGETS: OverviewWidgetConfig[] = [
+export const LEGACY_DEFAULT_OVERVIEW_WIDGETS: OverviewWidgetConfig[] = [
   { enabled: true, id: "system-status", size: "4:1", type: "system-status", variant: "timeline" },
   { enabled: true, id: "account-balance", size: "4:2", type: "account-balance", variant: "cards" },
   { enabled: true, id: "metric-requests", metric: "requests", size: "1:1", type: "metric", variant: "card" },
@@ -1418,6 +1420,24 @@ export const DEFAULT_OVERVIEW_WIDGETS: OverviewWidgetConfig[] = [
   { enabled: true, id: "metric-cache-ratio", metric: "cache-ratio", size: "1:1", type: "metric", variant: "card" },
   { enabled: true, id: "metric-estimated-cost", metric: "estimated-cost", size: "1:1", type: "metric", variant: "card" },
   { enabled: true, id: "usage-trend", size: "3:2", type: "usage-trend", variant: "composed" },
+  { enabled: true, id: "token-activity", size: "4:2", type: "token-activity", variant: "heatmap" },
+  { enabled: true, id: "token-mix", size: "1:2", type: "token-mix", variant: "bars" },
+  { enabled: true, id: "client-analysis", size: "2:2", type: "client-analysis", variant: "table" },
+  { enabled: true, id: "provider-analysis", size: "2:2", type: "provider-analysis", variant: "table" }
+];
+
+export const DEFAULT_OVERVIEW_WIDGETS: OverviewWidgetConfig[] = [
+  { enabled: true, id: "system-status", size: "4:1", type: "system-status", variant: "timeline" },
+  { enabled: true, id: "metric-requests", metric: "requests", size: "1:1", type: "metric", variant: "card" },
+  { enabled: true, id: "metric-success-rate", metric: "success-rate", size: "1:1", type: "metric", variant: "card" },
+  { enabled: true, id: "metric-avg-latency", metric: "avg-latency", size: "1:1", type: "metric", variant: "card" },
+  { enabled: true, id: "metric-estimated-cost", metric: "estimated-cost", size: "1:1", type: "metric", variant: "card" },
+  { enabled: true, id: "usage-trend", size: "4:2", type: "usage-trend", variant: "composed" },
+  { enabled: true, id: "metric-input-tokens", metric: "input-tokens", size: "1:1", type: "metric", variant: "card" },
+  { enabled: true, id: "metric-output-tokens", metric: "output-tokens", size: "1:1", type: "metric", variant: "card" },
+  { enabled: true, id: "metric-cache-tokens", metric: "cache-tokens", size: "1:1", type: "metric", variant: "card" },
+  { enabled: true, id: "metric-cache-ratio", metric: "cache-ratio", size: "1:1", type: "metric", variant: "card" },
+  { enabled: true, id: "account-balance", size: "4:2", type: "account-balance", variant: "cards" },
   { enabled: true, id: "token-activity", size: "4:2", type: "token-activity", variant: "heatmap" },
   { enabled: true, id: "token-mix", size: "1:2", type: "token-mix", variant: "bars" },
   { enabled: true, id: "client-analysis", size: "2:2", type: "client-analysis", variant: "table" },
@@ -1443,6 +1463,8 @@ export const TRAY_SINGLETON_WIDGET_TYPES = ["source-tabs", "header"] as const sa
 export const TRAY_TOP_WIDGET_TYPES = ["source-tabs", "header"] as const satisfies readonly TrayWidgetType[];
 
 export type TrayWidgetConfig = {
+  accountProvider?: string;
+  accountProviders?: string[];
   id: string;
   type: TrayWidgetType;
   variant?: TrayWidgetVariant;
@@ -1469,6 +1491,7 @@ export type ProfileSurface = "auto" | "cli" | "app";
 export type ProfileOpenSurface = "cli" | "app";
 
 export type ClaudeCodeProfileConfig = {
+  claudeSettings?: Record<string, unknown>;
   enabled: boolean;
   fableModel: string;
   haikuModel: string;
@@ -1503,6 +1526,7 @@ export type ProfileConfig = {
   botGateway?: BotGatewayRuntimeConfig;
   configFile?: string;
   cliMiddleware?: boolean;
+  claudeSettings?: Record<string, unknown>;
   codexCliPath?: string;
   codexHome?: string;
   configFormat?: CodexProfileConfigFormat;
@@ -2273,6 +2297,11 @@ export type UsageStatsSnapshot = {
   recentRequests: UsageComparisonRow[];
   series: UsageSeriesPoint[];
   totals: UsageTotals;
+};
+
+export type UsageStatsResetResult = {
+  deletedEvents: number;
+  resetAt: string;
 };
 
 export type AgentKind = "claude-code" | "codex" | "grok" | "kimi" | "kilo" | "opencode" | "pi" | "workbuddy" | "zcode" | "claude-design" | "unknown";

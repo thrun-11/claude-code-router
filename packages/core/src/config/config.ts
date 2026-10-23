@@ -372,6 +372,7 @@ export async function loadAppConfig(): Promise<AppConfig> {
 let appConfigWriteQueue: Promise<void> = Promise.resolve();
 let appThemePreferenceOverride: AppConfig["theme"] | undefined;
 
+/** Save settings; change gateway credentials through saveApiKeysConfig instead. */
 export async function saveAppConfig(config: AppConfig): Promise<AppConfig> {
   return enqueueAppConfigWrite(() => saveAppConfigNow(config));
 }
@@ -392,15 +393,14 @@ export async function saveAppThemePreference(theme: unknown): Promise<AppConfig[
 async function saveAppConfigNow(config: AppConfig): Promise<AppConfig> {
   const normalizedConfig = withSingleEnabledGlobalProfiles(config);
   assertProviderApiKeysAreSafe(normalizedConfig);
-  const apiKeys = ensureGatewayApiKeys(normalizeApiKeys(normalizedConfig.APIKEYS, normalizedConfig.APIKEY).filter((apiKey) => !isDefaultSeedApiKey(apiKey)));
   const pluginMigration = migrateKnownGatewayPluginConfigs(normalizedConfig.plugins);
-  await replacePersistedConfigSnapshot(sanitizeConfigForDisk({
+  // Credentials have their own save operation. A settings snapshot may predate
+  // a key revocation or rotation, so it must never replace the credential table.
+  await writeSanitizedConfig({
     ...normalizedConfig,
     theme: appThemePreferenceOverride ?? normalizedConfig.theme,
-    APIKEY: apiKeys[0]?.key ?? "",
-    APIKEYS: apiKeys,
     plugins: pluginMigration.plugins
-  }), apiKeys);
+  });
   return loadAppConfig();
 }
 
@@ -663,8 +663,10 @@ function providerCredentialApiKey(credential: ProviderCredentialConfig): string 
 
 export async function saveApiKeysConfig(apiKeys: ApiKeyConfig[]): Promise<AppConfig> {
   const normalized = ensureGatewayApiKeys(normalizeApiKeys(apiKeys, undefined).filter((apiKey) => !isDefaultSeedApiKey(apiKey)));
-  await replacePersistedApiKeys(normalized);
-  return loadAppConfig();
+  return enqueueAppConfigWrite(async () => {
+    await replacePersistedApiKeys(normalized);
+    return loadAppConfig();
+  });
 }
 
 async function loadRawAppConfig(): Promise<RawAppConfigLoadResult> {
@@ -717,15 +719,13 @@ async function writeSanitizedConfig(config: AppConfig): Promise<void> {
   await replacePersistedAppConfig(sanitizeConfigForDisk(config));
 }
 
-function sanitizeConfigForDisk(config: AppConfig): AppConfig {
+function sanitizeConfigForDisk(config: AppConfig): Record<string, unknown> {
+  const { coreHost: _coreHost, corePort: _corePort, ...gateway } = config.gateway;
   return {
     ...config,
     APIKEY: "",
     APIKEYS: [],
-    gateway: {
-      ...config.gateway,
-      coreHost: INTERNAL_GATEWAY_CORE_HOST
-    },
+    gateway,
     Providers: withProviderIds(config.Providers),
     profile: sanitizeProfileConfigForDisk(config.profile)
   };
@@ -1288,11 +1288,22 @@ function parseTrayWidget(value: unknown): TrayWidgetConfig | undefined {
     return undefined;
   }
   const variant = parseTrayWidgetVariant(type, value.variant);
+  const accountProviders = type === "account" ? parseTrayWidgetAccountProviders(value) : [];
   return {
+    ...(accountProviders.length === 1 ? { accountProvider: accountProviders[0] } : {}),
+    ...(accountProviders.length > 0 ? { accountProviders } : {}),
     id: readString(value.id) || trayWidgetId(type),
     type,
     ...(variant ? { variant } : {})
   };
+}
+
+function parseTrayWidgetAccountProviders(value: Record<string, unknown>): string[] {
+  const accountProvider = readString(value.accountProvider);
+  return uniqueStrings([
+    ...parseStringList(value.accountProviders),
+    ...(accountProvider ? [accountProvider] : [])
+  ]);
 }
 
 function parseTrayWidgetType(value: unknown): TrayWidgetType | undefined {
@@ -1431,7 +1442,7 @@ function parseProviders(value: unknown): GatewayProviderConfig[] | undefined {
           ?? parseProviderProtocolCapability(item),
         credentials: parseProviderCredentials(item.credentials ?? item.keys ?? item.apiKeys),
         extraBody: item.extraBody,
-        extraHeaders: item.extraHeaders,
+        extraHeaders: item.extraHeaders ?? item.extra_headers ?? item.headers,
         icon: readString(item.icon),
         id: readString(item.id),
         enabled: item.enabled === false ? false : undefined,
@@ -3438,17 +3449,19 @@ function parseGatewayPluginCoreGateway(value: unknown): GatewayPluginConfig["cor
     return undefined;
   }
   const providerPlugins = Array.isArray(value.providerPlugins) ? value.providerPlugins : undefined;
+  const plugins = Array.isArray(value.plugins) ? value.plugins : undefined;
   const virtualModelProfiles = Array.isArray(value.virtualModelProfiles)
     ? value.virtualModelProfiles as NonNullable<GatewayPluginConfig["coreGateway"]>["virtualModelProfiles"]
     : undefined;
   const config = isObject(value.config) ? { ...(value.config as Record<string, unknown>) } : undefined;
 
-  if (!providerPlugins && !virtualModelProfiles && !config) {
+  if (!providerPlugins && !plugins && !virtualModelProfiles && !config) {
     return undefined;
   }
 
   return {
     ...(config ? { config } : {}),
+    ...(plugins ? { plugins } : {}),
     ...(providerPlugins ? { providerPlugins } : {}),
     ...(virtualModelProfiles ? { virtualModelProfiles } : {})
   };
@@ -3469,6 +3482,10 @@ function parseProfile(value: unknown): LoadedProfileConfig | undefined {
     profile.claudeCode = {};
     if (typeof claudeCode.enabled === "boolean") {
       profile.claudeCode.enabled = claudeCode.enabled;
+    }
+    const claudeSettings = parseUnknownRecord(claudeCode.claudeSettings ?? claudeCode.claude_settings ?? claudeCode.settings);
+    if (claudeSettings) {
+      profile.claudeCode.claudeSettings = claudeSettings;
     }
     const managedCompact = readManagedCompact(claudeCode);
     if (managedCompact !== undefined) {
@@ -3625,11 +3642,13 @@ function parseProfiles(value: unknown): ProfileConfig[] | undefined {
 
       if (agent === "claude-code") {
         const appPath = readProfileAppPath(item, agent);
+        const claudeSettings = parseUnknownRecord(item.claudeSettings ?? item.claude_settings);
         return {
           agent,
           ...(appPath ? { appPath } : {}),
           ...(botConfigId ? { botConfigId } : {}),
           ...(botGateway ? { botGateway } : {}),
+          ...(claudeSettings ? { claudeSettings } : {}),
           enabled,
           env: claudeCodeProfileEnv(env),
           fableModel: readString(item.fableModel) || readString(item.defaultFableModel) || "",
@@ -3875,6 +3894,7 @@ function normalizeCodexConfigFileForAgent(agent: ProfileConfig["agent"], value: 
 function profileFromClaudeCodeConfig(config: ClaudeCodeProfileConfig): ProfileConfig {
   return {
     agent: "claude-code",
+    ...(config.claudeSettings ? { claudeSettings: { ...config.claudeSettings } } : {}),
     enabled: config.enabled,
     env: claudeCodeProfileEnv(),
     fableModel: config.fableModel,

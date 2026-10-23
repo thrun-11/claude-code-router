@@ -15,6 +15,11 @@ import {
   openCodeAppLaunchArgs,
   openCodeDesktopCommandNames
 } from "@ccr/core/agents/opencode/app-launch.ts";
+import {
+  findProviderModelCatalogEntry,
+  modelCatalogMaxInputTokens,
+  modelCatalogMaxOutputTokens
+} from "@ccr/core/gateway/model-catalog.ts";
 
 function testConfig(root) {
   const config = createDefaultAppConfig();
@@ -134,6 +139,9 @@ test("OpenCode profile config writes Fusion vision model metadata and resolved c
     );
     const written = JSON.parse(readFileSync(result.file, "utf8"));
     const models = written.provider["claude-code-router"].models;
+    const catalogEntry = findProviderModelCatalogEntry(config.Providers[0], "gpt-5.6-sol", ["Codex API/gpt-5.6-sol"]);
+    const expectedContext = modelCatalogMaxInputTokens(catalogEntry);
+    const expectedOutput = modelCatalogMaxOutputTokens(catalogEntry);
 
     assert.equal(written.model, "claude-code-router/Fusion/fusion-basic-vision");
     assert.deepEqual(models["Fusion/fusion-basic-vision"].modalities, {
@@ -141,16 +149,16 @@ test("OpenCode profile config writes Fusion vision model metadata and resolved c
       output: ["text"]
     });
     assert.deepEqual(models["Fusion/fusion-basic-vision"].limit, {
-      context: 1_050_000,
-      output: 1_050_000
+      context: expectedContext,
+      output: expectedOutput
     });
     assert.deepEqual(models["Codex API/gpt-5.6-sol"].modalities, {
       input: ["text", "image"],
       output: ["text"]
     });
     assert.deepEqual(models["Codex API/gpt-5.6-sol"].limit, {
-      context: 1_050_000,
-      output: 1_050_000
+      context: expectedContext,
+      output: expectedOutput
     });
   } finally {
     rmSync(root, { force: true, recursive: true });

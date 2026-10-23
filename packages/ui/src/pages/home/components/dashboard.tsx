@@ -5,7 +5,7 @@ import {
   Card, CardContent, CardHeader, CardTitle, CartesianGrid, Cell, constrainOverviewWidgetSize,
   Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, cn, codexLogoUrl, compactId,
   compactUserAgent, compareProviderAccountSnapshots, ComposedChart, CSS, Checkbox, DEFAULT_OVERVIEW_WIDGETS, DndContext,
-  Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle,
+  Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle,
   DragEndEvent, DragOverEvent, DragOverlay, DragStartEvent, Field, formatAxisNumber, formatBytes,
   formatCompactNumber, formatDuration, formatLogDateTime, formatPercent, formatPercentFixed, formatProviderAccountDetailDate, formatProviderAccountMeterTitle, formatProviderAccountMeterValue,
   formatStatusBucketDate, formatSystemStatusRange, formatUsdCost, KeyboardSensor,
@@ -46,21 +46,25 @@ function chartTooltipPortal(): HTMLElement | null {
 }
 
 export function OverviewView({
+  onConfigureProviderAccounts,
   onWidgetsChange,
   overviewWidgets,
   providerAccounts,
   providerAccountRefreshing = false,
   refreshProviderAccounts,
+  resetOverviewStatistics,
   setUsageRange,
   usageFilters,
   usageRange,
   usageStats
 }: {
+  onConfigureProviderAccounts?: () => void;
   onWidgetsChange: (widgets: OverviewWidgetConfig[]) => void;
   overviewWidgets: OverviewWidgetConfig[];
   providerAccounts: ProviderAccountSnapshot[];
   providerAccountRefreshing?: boolean;
   refreshProviderAccounts?: () => void | Promise<void>;
+  resetOverviewStatistics?: () => void | Promise<void>;
   setUsageRange: (range: UsageStatsRange) => void;
   usageFilters?: OverviewUsageFilters;
   usageRange: UsageStatsRange;
@@ -73,6 +77,9 @@ export function OverviewView({
   const [dragPreviewWidgets, setDragPreviewWidgets] = useState<OverviewWidgetConfig[]>();
   const [pendingScrollWidgetId, setPendingScrollWidgetId] = useState<string>();
   const [editing, setEditing] = useState(false);
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [resetError, setResetError] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: {
@@ -86,7 +93,9 @@ export function OverviewView({
   const widgets = useMemo(() => normalizeOverviewWidgets(overviewWidgets), [overviewWidgets]);
   const configuredVisibleWidgets = useMemo(() => widgets.filter((widget) => widget.enabled), [widgets]);
   const displayWidgets = dragPreviewWidgets ?? widgets;
-  const visibleWidgets = displayWidgets.filter((widget) => widget.enabled);
+  const accountsUnconfigured = providerAccounts.length === 0 && !(usageFilters?.providers ?? []).some((provider) => provider.account?.enabled);
+  const showAccountSetup = !editing && accountsUnconfigured && displayWidgets.some((widget) => widget.enabled && widget.type === "account-balance");
+  const visibleWidgets = displayWidgets.filter((widget) => widget.enabled && !(showAccountSetup && widget.type === "account-balance"));
   const activeWidget = visibleWidgets.find((widget) => widget.id === activeWidgetId);
   const selectedWidget = widgets.find((widget) => widget.id === selectedWidgetId);
   const filterProviders = usageFilters?.providers ?? emptyOverviewProviders;
@@ -309,6 +318,32 @@ export function OverviewView({
     setSelectedWidgetId(undefined);
   }
 
+  function openResetDialog() {
+    setResetError("");
+    setResetDialogOpen(true);
+  }
+
+  async function confirmResetStatistics() {
+    if (resetBusy) {
+      return;
+    }
+    if (!resetOverviewStatistics) {
+      setResetError(t("Overview statistics reset is unavailable."));
+      return;
+    }
+
+    setResetBusy(true);
+    setResetError("");
+    try {
+      await resetOverviewStatistics();
+      setResetDialogOpen(false);
+    } catch (error) {
+      setResetError(formatDialogError(error));
+    } finally {
+      setResetBusy(false);
+    }
+  }
+
   const widgetGrid = (
     <DndContext
       collisionDetection={overviewWidgetCollisionDetection}
@@ -350,6 +385,12 @@ export function OverviewView({
               <OverviewEmptyState className="col-span-1 sm:col-span-2 xl:col-span-4" label={t("No widgets configured")} />
             ) : null}
           </section>
+          {showAccountSetup ? (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-3 text-[13px]">
+              <span className="text-muted-foreground">{t("No account balance connectors configured")}</span>
+              {onConfigureProviderAccounts ? <Button onClick={onConfigureProviderAccounts} variant="outline">{t("Configure account usage")}</Button> : null}
+            </div>
+          ) : null}
         </LayoutGroup>
       </SortableContext>
       <DragOverlay adjustScale={false}>
@@ -396,6 +437,17 @@ export function OverviewView({
           />
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Button
+            className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            onClick={openResetDialog}
+            size="sm"
+            title={t("Reset statistics")}
+            type="button"
+            variant="outline"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            {t("Reset statistics")}
+          </Button>
           {editing ? (
             <Button onClick={resetLayout} size="sm" type="button" variant="outline">
               <RefreshCw className="h-3.5 w-3.5" />
@@ -454,7 +506,73 @@ export function OverviewView({
         widgetGrid
       )}
 
+      <OverviewStatisticsResetDialog
+        busy={resetBusy}
+        error={resetError}
+        open={resetDialogOpen}
+        onClose={() => {
+          if (!resetBusy) {
+            setResetDialogOpen(false);
+          }
+        }}
+        onConfirm={() => void confirmResetStatistics()}
+      />
     </motion.div>
+  );
+}
+
+export function OverviewStatisticsResetDialog({
+  busy,
+  error,
+  onClose,
+  onConfirm,
+  open
+}: {
+  busy?: boolean;
+  error?: string;
+  onClose: () => void;
+  onConfirm: () => void;
+  open: boolean;
+}) {
+  const t = useAppText();
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!nextOpen && !busy) onClose(); }}>
+      <DialogContent className="max-w-[520px]">
+        <DialogHeader>
+          <div className="min-w-0">
+            <DialogTitle>{t("Reset overview statistics")}</DialogTitle>
+          </div>
+          <Button aria-label={t("Close dialog")} disabled={busy} onClick={onClose} size="iconSm" title={t("Close")} type="button" variant="ghost">
+            <X className="h-4 w-4" />
+          </Button>
+        </DialogHeader>
+
+        <DialogBody>
+          <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5">
+            <div className="flex items-start gap-2 text-[12px] font-medium text-destructive">
+              <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{t("Reset Overview statistics?")}</span>
+            </div>
+            <div className="mt-2 space-y-1 text-[11px] text-muted-foreground">
+              <div>{t("Overview statistics data will be deleted and cannot be recovered.")}</div>
+              <div>{t("This clears the usage events used by the Overview page. Request logs and configuration are not deleted.")}</div>
+            </div>
+          </div>
+          {error ? <div className="mt-3 rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">{error}</div> : null}
+        </DialogBody>
+
+        <DialogFooter>
+          <Button autoFocus disabled={busy} onClick={onClose} type="button" variant="outline">
+            {t("Cancel")}
+          </Button>
+          <Button disabled={busy} onClick={onConfirm} type="button" variant="destructive">
+            {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            {busy ? t("Resetting") : t("Reset")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1177,7 +1295,7 @@ function OverviewMetricWidget({
 }) {
   const t = useAppText();
   const item = overviewMetricDatum(metric, totals, t);
-  const showsRatio = overviewMetricShowsRatio(metric);
+  const showsRatio = totals.requestCount > 0 && overviewMetricShowsRatio(metric);
 
   if (variant === "compact") {
     return (
@@ -2224,13 +2342,13 @@ function overviewMetricDatum(metric: OverviewMetricKind, totals: UsageTotals, tr
     return { label: translate("Estimated cost"), ratio: Math.min(1, Math.max(0, (totals.costUsd ?? 0) / 1)), tone: "slate", value: formatUsdCost(totals.costUsd) };
   }
   if (metric === "success-rate") {
-    return { label: translate("Success rate"), ratio: totals.successRate, tone: "teal", value: formatPercent(totals.successRate) };
+    return { label: translate("Request success rate"), ratio: totals.successRate, tone: "teal", value: totals.requestCount > 0 ? formatPercent(totals.successRate) : "—" };
   }
   if (metric === "errors") {
     return { label: translate("Errors"), ratio: totals.requestCount > 0 ? totals.errorCount / totals.requestCount : 0, tone: "rose", value: formatCompactNumber(totals.errorCount) };
   }
   if (metric === "avg-latency") {
-    return { label: translate("Average latency"), ratio: Math.min(1, Math.max(0, totals.avgDurationMs / 10_000)), tone: "amber", value: formatDuration(totals.avgDurationMs) };
+    return { label: translate("Average latency"), ratio: Math.min(1, Math.max(0, totals.avgDurationMs / 10_000)), tone: "amber", value: totals.requestCount > 0 ? formatDuration(totals.avgDurationMs) : "—" };
   }
   return { label: translate("Requests"), ratio: totals.requestCount > 0 ? 1 : 0, tone: "teal", value: formatCompactNumber(totals.requestCount) };
 }
@@ -2300,7 +2418,9 @@ function SystemStatusBar({
     point,
     tone: usageStatusTone(point)
   }));
-  const availability = usageStats.totals.requestCount > 0 ? usageStats.totals.successRate : 0;
+  const successLabel = usageStats.totals.requestCount > 0
+    ? `${formatPercent(usageStats.totals.successRate)} ${t("Request success rate")}`
+    : t("No requests yet");
   const overallTone = usageStatusTone(usageStats.totals);
   const StatusIcon = overallTone === "ok" ? Check : CircleAlert;
   const rangeLabel = formatSystemStatusRange(segments, usageRange);
@@ -2336,7 +2456,7 @@ function SystemStatusBar({
             </div>
           </div>
           <Badge variant={overallTone === "ok" ? "success" : overallTone === "warn" ? "warning" : overallTone === "error" ? "danger" : "outline"}>
-            {formatPercent(availability)}
+            {successLabel}
           </Badge>
         </CardContent>
       </Card>
@@ -2361,7 +2481,7 @@ function SystemStatusBar({
               <span className="min-w-0 truncate text-[13px] font-semibold">{t("API Service")}</span>
             </div>
             <Badge variant={overallTone === "ok" ? "success" : overallTone === "warn" ? "warning" : overallTone === "error" ? "danger" : "outline"}>
-              {formatPercent(availability)} {t("Availability")}
+              {successLabel}
             </Badge>
           </div>
 
@@ -2406,7 +2526,7 @@ function SystemStatusBar({
                 </span>
                 <span className="flex justify-between gap-3">
                   <span className="text-muted-foreground">{t("Success rate")}</span>
-                  <span className="font-medium">{formatPercent(statusTooltip.segment.point.successRate)}</span>
+                  <span className="font-medium">{statusTooltip.segment.point.requestCount > 0 ? formatPercent(statusTooltip.segment.point.successRate) : "—"}</span>
                 </span>
                 <span className="flex justify-between gap-3">
                   <span className="text-muted-foreground">{t("Failed requests")}</span>

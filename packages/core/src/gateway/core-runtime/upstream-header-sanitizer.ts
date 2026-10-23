@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { applyMetaTokenFloor } from "@ccr/core/gateway/core-runtime/meta-token-floor";
 import { applyResponsesSessionAffinity } from "@ccr/core/gateway/core-runtime/responses-session-affinity";
 import type { ResponsesSessionAffinityInput } from "@ccr/core/gateway/core-runtime/responses-session-affinity";
 import { applyResponsesToolStrictness } from "@ccr/core/gateway/core-runtime/responses-tool-strictness";
 import type { ResponsesToolStrictnessInput } from "@ccr/core/gateway/core-runtime/responses-tool-strictness";
+import { sdkCompatibleTokenHeaderNames } from "@ccr/core/gateway/internal/shared";
 
 type UpstreamRequest = {
   body: unknown;
@@ -17,9 +19,11 @@ type ProviderPluginRequestInput = {
     anthropicBaseUrl?: string;
   };
   request?: {
+    id?: string;
     headers?: Record<string, string | string[] | undefined>;
   };
   targetProviderConfig?: {
+    apikey?: string;
     baseurl?: string;
     type?: string;
   };
@@ -39,11 +43,7 @@ const ccrRoutingHeaderNames = new Set([
   "x-target-providers"
 ]);
 
-const clientAuthHeaderNames = new Set([
-  "api-key",
-  "authorization",
-  "x-api-key"
-]);
+const clientAuthHeaderNames = new Set<string>(sdkCompatibleTokenHeaderNames);
 
 const proxyMetadataHeaderNames = new Set([
   "forwarded",
@@ -193,13 +193,38 @@ export function createGatewayPlugin() {
     providerHooks: [{
       key: "ccr-upstream-header-sanitizer",
       transformRequest(input: ProviderPluginRequestInput) {
+        const upstreamRequest = {
+          ...input.upstreamRequest,
+          headers: mergeUpstreamProviderHeaders(input.request?.headers, input.upstreamRequest.headers),
+          url: rewriteUpstreamProviderUrl(input.upstreamRequest.url, input.targetProviderConfig, input.config)
+        };
+        const apiKey = input.targetProviderConfig?.apikey?.trim();
+        if (!upstreamRequest.headers["x-opencode-session"]?.trim()) {
+          try {
+            const url = new URL(upstreamRequest.url);
+            if (url.protocol === "https:" && url.hostname === "opencode.ai" && /^\/zen\/go\/v1(?:\/|$)/.test(url.pathname)) {
+              upstreamRequest.headers["x-opencode-session"] = `ccr-${input.request?.id || randomUUID()}`;
+            }
+          } catch {
+            // Invalid URLs are reported by the upstream transport.
+          }
+        }
+        if (apiKey?.startsWith("AIza") && /^gemini(?:_|$)/.test(input.targetProviderConfig?.type ?? "")) {
+          try {
+            const url = new URL(upstreamRequest.url);
+            if (url.hostname === "generativelanguage.googleapis.com") {
+              if (upstreamRequest.headers.authorization === `Bearer ${apiKey}`) delete upstreamRequest.headers.authorization;
+              upstreamRequest.headers["x-goog-api-key"] = apiKey;
+              url.searchParams.set("key", apiKey);
+              upstreamRequest.url = url.toString();
+            }
+          } catch {
+            // Invalid URLs are reported by the upstream transport.
+          }
+        }
         return {
           ok: true as const,
-          value: applyMetaTokenFloor({
-            ...input.upstreamRequest,
-            headers: mergeUpstreamProviderHeaders(input.request?.headers, input.upstreamRequest.headers),
-            url: rewriteUpstreamProviderUrl(input.upstreamRequest.url, input.targetProviderConfig, input.config)
-          })
+          value: applyMetaTokenFloor(upstreamRequest)
         };
       }
     }, {

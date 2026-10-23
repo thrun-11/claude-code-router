@@ -99,6 +99,12 @@ test("startGateway reuses an already healthy CCR gateway on the configured port"
     port: 0,
     startGateway: false
   });
+  const originalStart = gatewayService.start;
+  let managedStarts = 0;
+  gatewayService.start = async function (...args) {
+    managedStarts += 1;
+    return originalStart.apply(this, args);
+  };
 
   try {
     const payload = await rpc(runtime.url, webAuthToken, "startGateway");
@@ -109,11 +115,13 @@ test("startGateway reuses an already healthy CCR gateway on the configured port"
     assert.equal(payload.value.gatewayManagedExternally, true);
     assert.equal(gatewayService.getStatus().state, "running");
     assert.equal(gatewayService.getStatus().gatewayManagedExternally, true);
+    assert.equal(managedStarts, 0, "existing gateways should be adopted without spawning a competing runtime");
 
     const secondStart = await rpc(runtime.url, webAuthToken, "startGateway");
     assert.equal(secondStart.ok, true);
     assert.equal(secondStart.value.endpoint, `http://127.0.0.1:${gatewayPort}`);
     assert.equal(secondStart.value.gatewayManagedExternally, true);
+    assert.equal(managedStarts, 0);
 
     const nextConfig = structuredClone(savedConfig);
     nextConfig.Providers[0].name = "Updated Test Provider";
@@ -125,6 +133,7 @@ test("startGateway reuses an already healthy CCR gateway on the configured port"
     assert.equal(externalGatewayState.revision, gatewayRuntimeConfigRevision(saveResult.value));
     assert.equal(gatewayService.getStatus().gatewayManagedExternally, true);
   } finally {
+    gatewayService.start = originalStart;
     await runtime.close();
     await gatewayService.stop();
     await closeServer(externalGateway);
